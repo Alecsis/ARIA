@@ -1,26 +1,32 @@
 from machine import Pin, I2C
-from time import sleep_ms
-from MPU6050 import MPU6050  # your file name
+from time import sleep
+#from mpu6050 import MPU6050
+from BME280 import BME280
 
+i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=400000)
 
-i2c = I2C(
-    0,
-    scl=Pin(5), 
-    sda=Pin(4),
-    freq=400000
-)
-print("I2C Scan:", i2c.scan())
-mpu = MPU6050(i2c)
-print("MPU6050 initialized")
+#mpu = MPU6050(i2c)
+bme = BME280(i2c=i2c)
+
+print("Sensors ready")
+
 while True:
-    accel = mpu.read_accel_data()   # m/s^2
-    gyro = mpu.read_gyro_data()     # deg/s
-    temp = mpu.read_temperature()   # °C
-    print("----- MPU6050 -----")
-    print("Accel (m/s^2):", accel)
-    print("Gyro  (deg/s):", gyro)
-    print("Temp  (C):", temp)
-    angle = mpu.read_angle()
-    print("Angle (rad):", angle)
-    print("-------------------\n")
-    sleep_ms(100)
+    # accel = mpu.read_accel_data()
+    # gyro = mpu.read_gyro_data()
+
+    temp, press, hum = bme.read_compensated_data()
+    alt = bme.altitude
+
+   ## print("---- MPU ----")
+   ## print("Accel:", accel)
+   ## print("Gyro :", gyro)
+
+    print("---- BME ----")
+    print("Temp:", temp)
+    print("Pressure:", press)
+    print("Humidity:", hum)
+    print("Altitude:", alt, "m")
+
+    print("\n")
+
+    sleep(1)
