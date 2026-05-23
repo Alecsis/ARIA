@@ -1,4 +1,4 @@
-from radio import Radio
+from lib.radio import Radio
 import time
 
 radio = Radio()
