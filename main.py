@@ -1,7 +1,7 @@
 from machine import Pin, I2C
 from time import sleep_ms
-from MPU6050 import MPU6050  # your file name
-
+from lib.MPU6050 import MPU6050  # your file name
+import os
 
 i2c = I2C(
     0,
