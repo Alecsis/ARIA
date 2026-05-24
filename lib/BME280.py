@@ -1,6 +1,5 @@
 from machine import I2C
 import time
-from array import array
 from ustruct import unpack
 
 # Default address
@@ -14,17 +13,19 @@ _REG_CTRL_HUM = 0xF2
 _REG_CTRL = 0xF4
 _REG_STATUS = 0xF3
 
-MODE_FORCED = 1
-
 
 class BME280:
     def __init__(self, i2c, address=BME280_I2CADDR):
         self.i2c = i2c
         self.address = address
-        self.t_fine = 0
-        self.sea_level_pressure = 101325  # Pa default
 
-        # Load calibration data
+        self.t_fine = 0
+        self.sea_level_pressure = 101325
+
+        # ground calibration
+        self.baseline_pressure = None
+
+        # read calibration data
         cal1 = self.i2c.readfrom_mem(self.address, _REG_CALIB_00, 26)
         cal2 = self.i2c.readfrom_mem(self.address, _REG_CALIB_26, 7)
 
@@ -38,11 +39,11 @@ class BME280:
         self.dig_H4 = (self.dig_H4 * 16) | (self.dig_H5 & 0x0F)
         self.dig_H5 >>= 4
 
-        self._buf = bytearray(8)
-        self._data = array("i", [0, 0, 0])
-
         self.i2c.writeto_mem(self.address, _REG_CTRL, b"\x00")
 
+    # -------------------------
+    # RAW SENSOR READ
+    # -------------------------
     def _read_raw(self):
         self.i2c.writeto_mem(self.address, _REG_CTRL_HUM, b"\x01")
         self.i2c.writeto_mem(self.address, _REG_CTRL, b"\x25")  # forced mode
@@ -50,14 +51,18 @@ class BME280:
         while self.i2c.readfrom_mem(self.address, _REG_STATUS, 1)[0] & 0x08:
             time.sleep_ms(5)
 
-        self.i2c.readfrom_mem_into(self.address, _REG_DATA, self._buf)
+        buf = bytearray(8)
+        self.i2c.readfrom_mem_into(self.address, _REG_DATA, buf)
 
-        raw_press = ((self._buf[0] << 16) | (self._buf[1] << 8) | self._buf[2]) >> 4
-        raw_temp = ((self._buf[3] << 16) | (self._buf[4] << 8) | self._buf[5]) >> 4
-        raw_hum = (self._buf[6] << 8) | self._buf[7]
+        raw_press = ((buf[0] << 16) | (buf[1] << 8) | buf[2]) >> 4
+        raw_temp = ((buf[3] << 16) | (buf[4] << 8) | buf[5]) >> 4
+        raw_hum = (buf[6] << 8) | buf[7]
 
         return raw_temp, raw_press, raw_hum
 
+    # -------------------------
+    # COMPENSATED VALUES
+    # -------------------------
     def read_compensated_data(self):
         raw_temp, raw_press, raw_hum = self._read_raw()
 
@@ -83,6 +88,7 @@ class BME280:
             var2 = p * self.dig_P8 / 32768.0
             pressure = p + var1 + var2 + self.dig_P7
 
+        # humidity
         h = self.t_fine - 76800.0
         h = (raw_hum - (self.dig_H4 * 64.0 + self.dig_H5 / 16384.0 * h)) * \
             (self.dig_H2 / 65536.0 * (1.0 + self.dig_H6 / 67108864.0 * h *
@@ -93,11 +99,27 @@ class BME280:
 
         return temp, pressure, humidity
 
+    # -------------------------
+    # GROUND CALIBRATION
+    # -------------------------
+    def calibrate(self, samples=20, delay_ms=50):
+        total = 0
+
+        for _ in range(samples):
+            _, p, _ = self.read_compensated_data()
+            total += p
+            time.sleep_ms(delay_ms)
+
+        self.baseline_pressure = total / samples
+        return self.baseline_pressure
+
+    # -------------------------
+    # ALTITUDE (ZEROED)
+    # -------------------------
     def altitude(self, pressure=None):
-        """
-        Returns altitude in meters using barometric formula
-        """
         if pressure is None:
             _, pressure, _ = self.read_compensated_data()
 
-        return 44330.0 * (1.0 - (pressure / self.sea_level_pressure) ** 0.1903)
+        base = self.baseline_pressure if self.baseline_pressure else self.sea_level_pressure
+
+        return 44330.0 * (1.0 - (pressure / base) ** 0.1903)
