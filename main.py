@@ -1,10 +1,10 @@
-from lib.radio import Radio
+from radio import Radio
 import time
 
 radio = Radio()
-counter = 0
 
-print("Starting radio test...")
+counter = 0
+print("TX ready")
 
 while True:
     msg = "AVO {}".format(counter)
