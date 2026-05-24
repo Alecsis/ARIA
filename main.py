@@ -4,13 +4,14 @@ import time
 radio = Radio()
 
 counter = 0
+
 print("TX ready")
 
 while True:
-    msg = "AVO {}".format(counter)
-    print("Sending:", msg)
+    msg = "AVO|{}".format(counter)
 
+    print("Sending:", msg)
     radio.send(msg.encode())
 
     counter += 1
-    time.sleep(0.5)
+    time.sleep(0.2)
