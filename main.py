@@ -16,20 +16,32 @@ while True:
 
             parts = msg.split("|")
 
+            if len(parts) != 9:
+                print("Bad packet length:", len(parts))
+                continue
+
             if parts[0] != "AVO":
                 print("Non-AVO packet:", msg)
                 continue
 
-            pkt_type = parts[1]
+            counter = int(parts[1])
 
-            if pkt_type == "A":
-                print("GYRO PACKET:", parts[2:])
+            gx = float(parts[2])
+            gy = float(parts[3])
+            gz = float(parts[4])
 
-            elif pkt_type == "B":
-                print("SENSOR PACKET:", parts[2:])
+            alt = float(parts[5])
 
-            else:
-                print("Unknown AVO type:", msg)
+            ax = float(parts[6])
+            ay = float(parts[7])
+            az = float(parts[8])
+
+            print("----- PACKET OK -----")
+            print("Counter:", counter)
+            print("Gyro:", gx, gy, gz)
+            print("Accel:", ax, ay, az)
+            print("Alt(ft):", alt)
+            print("---------------------")
 
         except Exception as e:
             print("Decode error:", e)
