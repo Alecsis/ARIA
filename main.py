@@ -5,15 +5,9 @@ from time import sleep_ms
 from lib.MPU6050 import MPU6050
 from lib.BME280 import BME280
 
-# =========================
-# RADIO
-# =========================
 radio = Radio()
 print("TX ready")
 
-# =========================
-# I2C SETUP
-# =========================
 i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
 
 mpu = MPU6050(i2c)
@@ -21,9 +15,7 @@ bme = BME280(i2c=i2c)
 
 print("Sensors initialized")
 
-# =========================
-# CALIBRATION
-# =========================
+# ---------- calibration ----------
 print("Calibrating gyro...")
 
 gx_off = gy_off = gz_off = 0
@@ -40,27 +32,20 @@ gx_off /= samples
 gy_off /= samples
 gz_off /= samples
 
-print("Gyro offsets:", gx_off, gy_off, gz_off)
-
-print("Calibrating pressure...")
 bme.calibrate(samples=100, delay_ms=20)
 
-last_alt = 0.0
-
+# ---------- helpers ----------
 def smooth(new, old):
     return (0.8 * old) + (0.2 * new)
 
 def to_feet(m):
     return m * 3.28084
 
-# =========================
-# MAIN LOOP
-# =========================
+last_alt = 0.0
 counter = 0
 
 while True:
 
-    # -------- MPU --------
     accel = mpu.read_accel_data()
     gyro = mpu.read_gyro_data()
 
@@ -68,7 +53,6 @@ while True:
     gy = gyro['y'] - gy_off
     gz = gyro['z'] - gz_off
 
-    # -------- BME --------
     temp, press, hum = bme.read_compensated_data()
     alt_m = bme.altitude(press)
 
@@ -81,19 +65,28 @@ while True:
     alt_ft = to_feet(alt_m)
 
     # =========================
-    # PACKET
+    # PACKET A (GYRO + ID)
     # =========================
-    msg = "A|{:.2f}|{:.2f}|{:.2f}|{:.1f}|{:.1f}|{:.1f}|{:.1f}".format(
-        gx, gy, gz,
+    pkt_a = "AVO|A|{}|{:.2f}|{:.2f}|{:.2f}".format(
+        counter, gx, gy, gz
+    )
+
+    # =========================
+    # PACKET B (SENSORS)
+    # =========================
+    pkt_b = "AVO|B|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
         alt_ft,
         accel['x'],
         accel['y'],
         accel['z']
     )
 
-    print("Sending:", msg)
+    print("TX A:", pkt_a)
+    radio.send(pkt_a.encode())
+    time.sleep(0.01)
 
-    radio.send(msg.encode())
+    print("TX B:", pkt_b)
+    radio.send(pkt_b.encode())
 
     counter += 1
     sleep_ms(50)
