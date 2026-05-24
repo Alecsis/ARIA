@@ -1,6 +1,6 @@
 from radio import Radio
 import time
-import struct # <-- ADD THIS
+import struct
 
 radio = Radio()
 print("RX ready")
@@ -25,8 +25,9 @@ while True:
 
                 print("----- PACKET OK -----")
                 print(f"Counter: {counter}")
-                print(f"Gyro:    {gx:.2f}, {gy:.2f}, {gz:.2f}")
-                print(f"Accel:   {ax:.2f}, {ay:.2f}, {az:.2f}")
+                # Labeling gx and ax clearly as the active Pitch channel we isolated
+                print(f"Gyro (Pitch/Roll/Yaw): {gx:.2f}, {gy:.2f}, {gz:.2f}")
+                print(f"Accel(Pitch/Roll/Yaw): {ax:.2f}, {ay:.2f}, {az:.2f}")
                 print(f"Alt(ft): {alt:.2f}")
                 print("---------------------")
 
