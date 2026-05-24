@@ -1,24 +1,22 @@
 from machine import Pin, I2C
-from time import sleep_ms, ticks_ms
+from time import sleep_ms
 from lib.MPU6050 import MPU6050
+from lib.BME280 import BME280
 
 # =========================
 # I2C SETUP
 # =========================
-i2c = I2C(
-    1,
-    scl=Pin(7),
-    sda=Pin(6),
-    freq=100000
-)
+i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
 
 print("I2C Scan:", i2c.scan())
 
 mpu = MPU6050(i2c)
-print("MPU6050 initialized")
+bme = BME280(i2c=i2c)
+
+print("MPU6050 + BME280 initialized")
 
 # =========================
-# GYRO CALIBRATION (IMPORTANT)
+# GYRO CALIBRATION
 # =========================
 print("Calibrating gyro... keep sensor still")
 
@@ -28,7 +26,7 @@ gz_off = 0
 
 samples = 200
 
-for i in range(samples):
+for _ in range(samples):
     g = mpu.read_gyro_data()
     gx_off += g['x']
     gy_off += g['y']
@@ -39,72 +37,83 @@ gx_off /= samples
 gy_off /= samples
 gz_off /= samples
 
-print("Gyro offsets:")
-print(gx_off, gy_off, gz_off)
-
-print("Calibration complete.\n")
+print("Gyro offsets:", gx_off, gy_off, gz_off)
 
 # =========================
-# FLIGHT STATE
+# BARO CALIBRATION
 # =========================
-t = 0
-is_launched = False
+print("Calibrating ground pressure...")
+bme.calibrate(samples=100, delay_ms=20)
 
-altitude = 0.0  # placeholder until you add barometer
+print("Baseline:", bme.baseline_pressure)
+print("Altitude zeroed!\n")
+
+# =========================
+# FILTERS
+# =========================
+last_alt = 0.0
+
+def smooth(new, old):
+    return (0.8 * old) + (0.2 * new)
+
+def to_feet(m):
+    return m * 3.28084
 
 # =========================
 # MAIN LOOP
 # =========================
 while True:
 
+    # -------- MPU --------
     accel = mpu.read_accel_data()
     gyro = mpu.read_gyro_data()
-    temp = mpu.read_temperature()
 
-    # -------------------------
-    # APPLY GYRO ZEROING
-    # -------------------------
     gx = gyro['x'] - gx_off
     gy = gyro['y'] - gy_off
     gz = gyro['z'] - gz_off
 
-    # -------------------------
-    # SIMPLE LAUNCH DETECTION (TEMP LOGIC)
-    # replace later with real sensor or threshold
-    # -------------------------
-    if t > 50:
-        is_launched = True
+    # -------- BME --------
+    temp, press, hum = bme.read_compensated_data()
 
-    # -------------------------
-    # ALTITUDE SIMULATION (TEMP PLACEHOLDER)
-    # replace with barometer later
-    # -------------------------
-    if is_launched:
-        altitude += 0.5
-    else:
-        altitude = max(0, altitude - 0.02)
+    # altitude (meters)
+    alt_m = bme.altitude(press)
 
-    # -------------------------
-    # PACKET (MATCHS PROCESSING FORMAT)
-    # AVO,pitch,roll,yaw,alt,ax,ay,az
-    # -------------------------
-    packet = "AVO,{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f},{:.2f}".format(
+    # deadband FIRST (important fix)
+    if abs(alt_m) < 0.5:
+        alt_m = 0
+
+    # smoothing AFTER deadband
+    alt_m = smooth(alt_m, last_alt)
+    last_alt = alt_m
+
+    # convert to feet
+    alt_ft = to_feet(alt_m)
+
+    # for display only
+    alt_ft_print = round(alt_ft, 3)
+
+    # =========================
+    # PRINT DEBUG
+    # =========================
+    print("---- BME ----")
+    print("Temp:", temp)
+    print("Pressure:", press)
+    print("Humidity:", hum)
+    print("Altitude:", "{:.3f} ft".format(alt_ft_print))
+    print()
+
+    # =========================
+    # PACKET
+    # =========================
+    packet = "AVO,{:.2f},{:.2f},{:.2f},{:.3f},{:.2f},{:.2f},{:.2f}".format(
         gx, gy, gz,
-        altitude,
-        accel['x'], # type: ignore
-        accel['y'], # type: ignore
-        accel['z'] # type: ignore
+        alt_ft,
+        accel['x'],
+        accel['y'],
+        accel['z']
     )
 
     print(packet)
-
-    # -------------------------
-    # DEBUG OUTPUT (OPTIONAL)
-    # -------------------------
-    print("TEMP:", temp)
-    print("ACC:", accel)
-    print("GYRO:", {"x": gx, "y": gy, "z": gz})
     print("-------------------\n")
 
-    t += 1
-    sleep_ms(50)  # ~20 Hz
+    sleep_ms(50)
