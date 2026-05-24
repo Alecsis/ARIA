@@ -3,11 +3,15 @@ import time
 
 radio = Radio()
 
-print("Waiting for messages...")
+print("RX ready")
 
 while True:
     if radio.available():
         data = radio.recv()
-        print("Received:", data)
+        if data:
+            try:
+                print("Received:", data.decode())
+            except:
+                print("Received raw:", data)
 
     time.sleep(0.05)
