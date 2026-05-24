@@ -1,5 +1,6 @@
 from radio import Radio
 import time
+import struct # <-- ADD THIS
 from machine import Pin, I2C
 from time import sleep_ms
 from lib.MPU6050 import MPU6050
@@ -45,7 +46,6 @@ last_alt = 0.0
 counter = 0
 
 while True:
-
     accel = mpu.read_accel_data()
     gyro = mpu.read_gyro_data()
 
@@ -61,25 +61,21 @@ while True:
 
     alt_m = smooth(alt_m, last_alt)
     last_alt = alt_m
-
     alt_ft = to_feet(alt_m)
 
-    msg = "AVO|{}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
-        counter,
-        gx, gy, gz,
-        alt_ft,
-        accel['x'],
-        accel['y'],
-        accel['z']
+    # PACK DATA INTO 32 BYTES
+    # '<I7f' means: Little-Endian ('<'), 1 Unsigned Int ('I'), 7 Floats ('7f')
+    msg = struct.pack('<I7f', 
+        counter, 
+        gx, gy, gz, 
+        alt_ft, 
+        accel['x'], accel['y'], accel['z']
     )
 
-    print("TX:", msg)
+    print(f"TX: Packet {counter} -> {len(msg)} bytes")
     
-    if not radio.send(msg.encode()):
+    if not radio.send(msg):
         print("FAILED TO SEND")
     
     counter += 1
-    sleep_ms(50)
-
-    counter += 1
-    sleep_ms(50)
+    sleep_ms(100) # Reverted to single sleep block for clean timing
