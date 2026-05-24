@@ -72,7 +72,7 @@ while True:
     accel = mpu.read_accel_data(g=True) 
     gyro = mpu.read_gyro_data()
 
-    # --- HARDWARE WATCHDOG LAYER ---
+    # Watchdog check
     if abs(accel['x']) == 0.0 and abs(accel['y']) == 0.0 and abs(accel['z']) == 0.0:
         consecutive_dead_packets += 1
         if consecutive_dead_packets >= 5:
@@ -83,30 +83,28 @@ while True:
             continue
     else:
         consecutive_dead_packets = 0
-    # -------------------------------
 
-    # 1. Apply your calibrated calibration offsets
+    # Apply gyro calibration offsets
     raw_gx = gyro['x'] - gx_off
     raw_gy = gyro['y'] - gy_off
     raw_gz = gyro['z'] - gz_off
 
-    # 2. THE REMAPPING FIX
-    # We swap the axes right here so the radio transmits what Processing expects!
-    # Processing expects Pitch on the 1st gyro slot and 1st accel slot.
+    # ========== CORRECTED AXIS MAPPING ==========
+    # For sensor mounted 90° off-axis:
+    # Map physical Z → pitch (X in Processing)
+    # Map physical Y → roll (Y in Processing)  
+    # Map physical X → vertical (Z in Processing)
     
-    tx_gx = raw_gy       # Force Processing's Pitch loop to listen to physical Gyro Y
-    tx_gy = raw_gx       # Route Gyro X to the Roll channel slot
-    tx_gz = raw_gz       # Keep Yaw on Yaw
+    tx_ax = accel['z']   # Physical Z → Processing accelX (pitch)
+    tx_ay = accel['y']   # Physical Y → Processing accelY (roll)
+    tx_az = accel['x']   # Physical X → Processing accelZ (vertical - should be ~1G)
     
-    # 2. Accelerometer Swaps (Aligns gravity changes with the calculation)
-    # Because your movement shifts physical Accel Z, we must pass it to the 
-    # position Processing uses for the Pitch angle trig matrix (Position 1).
-    tx_ax = accel['z']   # Route physical Accel Z into Processing's 'accelX' slot
-    tx_ay = accel['y']   # Route physical Accel Y into Processing's 'accelY' slot
-    tx_az = accel['x']   # Route physical Accel X into Processing's 'accelZ' slot
-    # =========================================================================
+    tx_gx = raw_gz       # Physical Z gyro → pitch rate
+    tx_gy = raw_gy       # Physical Y gyro → roll rate
+    tx_gz = raw_gx       # Physical X gyro → yaw rate
+    # ============================================
 
-    # --- BME280 Altitude Logic ---
+    # Altitude reading
     try:
         temp, press, hum = bme.read_compensated_data()
         alt_m = bme.altitude(press)
@@ -120,8 +118,7 @@ while True:
     last_alt = alt_m
     alt_ft = to_feet(alt_m)
 
-    # 3. PACK DATA INTO THE SAME 32 BYTES
-    # Processing receives this and has no idea we swapped the wires in code!
+    # Pack and send
     msg = struct.pack('<I7f', 
         counter, 
         tx_gx, tx_gy, tx_gz, 
@@ -129,7 +126,8 @@ while True:
         tx_ax, tx_ay, tx_az
     )
 
-    print(f"TX Pack {counter} -> Sent Pitch Gyro: {tx_gx:.2f}°/s | Sent Pitch Accel: {tx_ax:.2f}g")
+    # Debug output - should show Z ≈ 1.0G at rest
+    print(f"Pack {counter:3d} | Accel: X={tx_ax:5.2f} Y={tx_ay:5.2f} Z={tx_az:5.2f}G | Alt={alt_ft:5.2f}ft")
     
     if not radio.send(msg):
         print("FAILED TO SEND RADIO")
