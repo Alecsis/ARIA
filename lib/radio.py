@@ -48,14 +48,20 @@ class Radio:
 
         print("Radio initialized")
 
-    def send(self, data: bytes):
+    def send(self, data: bytes, retries=3):
         self.nrf.stop_listening()
-        try:
-            self.nrf.send(data)
-        except OSError as e:
-            print("Send failed:", e)
+    
+        for _ in range(retries):
+            try:
+                self.nrf.send(data)
+                self.nrf.start_listening()
+                return True
+            except OSError as e:
+                print("Send retry:", e)
+                time.sleep(0.01)
+    
         self.nrf.start_listening()
-
+        return False
     def available(self):
         return self.nrf.any()
 

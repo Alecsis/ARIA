@@ -64,29 +64,22 @@ while True:
 
     alt_ft = to_feet(alt_m)
 
-    # =========================
-    # PACKET A (GYRO + ID)
-    # =========================
-    pkt_a = "AVO|A|{}|{:.2f}|{:.2f}|{:.2f}".format(
-        counter, gx, gy, gz
-    )
-    
-    # =========================
-    # PACKET B (SENSORS)
-    # =========================
-    pkt_b = "AVO|B|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
+    msg = "AVO|{}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
+        counter,
+        gx, gy, gz,
         alt_ft,
         accel['x'],
         accel['y'],
         accel['z']
     )
 
-    print("TX A:", pkt_a)
-    radio.send(pkt_a.encode())
-    time.sleep(0.01)
-
-    print("TX B:", pkt_b)
-    radio.send(pkt_b.encode())
+    print("TX:", msg)
+    
+    if not radio.send(msg.encode()):
+        print("FAILED TO SEND")
+    
+    counter += 1
+    sleep_ms(50)
 
     counter += 1
     sleep_ms(50)
