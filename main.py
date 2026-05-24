@@ -70,11 +70,11 @@ while True:
     pkt_a = "AVO|A|{}|{:.2f}|{:.2f}|{:.2f}".format(
         counter, gx, gy, gz
     )
-
+    
     # =========================
     # PACKET B (SENSORS)
     # =========================
-    pkt_b = "AVO|B|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
+    pkt_b = "AVO|B|{:.2f}|{:.2f}|{:.2f}|{:.2f}".format(
         alt_ft,
         accel['x'],
         accel['y'],
