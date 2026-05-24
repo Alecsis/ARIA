@@ -130,4 +130,4 @@ while True:
         print("FAILED TO SEND RADIO")
     
     counter += 1
-    sleep_ms(100)
+    sleep_ms(50)
