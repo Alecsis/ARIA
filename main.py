@@ -90,18 +90,15 @@ while True:
     raw_gz = gyro['z'] - gz_off
 
     # ========== CORRECTED AXIS MAPPING ==========
-    # For sensor mounted 90° off-axis:
-    # Map physical Z → pitch (X in Processing)
-    # Map physical Y → roll (Y in Processing)  
-    # Map physical X → vertical (Z in Processing)
-    
+    # Accelerometer mapping (keep this as is - it's working)
     tx_ax = accel['z']   # Physical Z → Processing accelX (pitch)
     tx_ay = accel['y']   # Physical Y → Processing accelY (roll)
-    tx_az = accel['x']   # Physical X → Processing accelZ (vertical - should be ~1G)
+    tx_az = accel['x']   # Physical X → Processing accelZ (vertical)
     
-    tx_gx = raw_gz       # Physical Z gyro → pitch rate
-    tx_gy = raw_gy       # Physical Y gyro → roll rate
-    tx_gz = raw_gx       # Physical X gyro → yaw rate
+    # Gyroscope mapping (FIXED for yaw)
+    tx_gx = raw_gx       # Physical X → pitch rate (matches accelerometer mapping)
+    tx_gy = raw_gy       # Physical Y → roll rate (matches accelerometer mapping)
+    tx_gz = raw_gz       # Physical Z → yaw rate (matches accelerometer mapping)
     # ============================================
 
     # Altitude reading
