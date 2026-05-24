@@ -2,39 +2,56 @@ from radio import Radio
 import time
 
 radio = Radio()
-
 print("RX ready")
+
+last = {}
 
 while True:
     if radio.available():
         data = radio.recv()
-
         if not data:
             continue
 
         try:
             msg = data.decode().strip()
+            parts = msg.split("|")
 
-            parts = msg.split(",")
+            if parts[0] != "AVO":
+                print("Bad packet:", msg)
+                continue
 
-            if parts[0] == "AVO" and len(parts) >= 8:
+            pkt_type = parts[1]
 
-                gx = float(parts[1])
-                gy = float(parts[2])
-                gz = float(parts[3])
-                alt = float(parts[4])
-                ax  = float(parts[5])
-                ay  = float(parts[6])
-                az  = float(parts[7])
+            # =====================
+            # PACKET A (GYRO)
+            # =====================
+            if pkt_type == "A":
+                counter = parts[2]
+                gx = float(parts[3])
+                gy = float(parts[4])
+                gz = float(parts[5])
 
-                print("----- PACKET OK -----")
+                last["counter"] = counter
+
+                print("\n--- PACKET A ---")
+                print("Counter:", counter)
                 print("Gyro:", gx, gy, gz)
-                print("Accel:", ax, ay, az)
+
+            # =====================
+            # PACKET B (SENSORS)
+            # =====================
+            elif pkt_type == "B":
+                alt = float(parts[2])
+                ax = float(parts[3])
+                ay = float(parts[4])
+                az = float(parts[5])
+
+                print("\n--- PACKET B ---")
                 print("Alt(ft):", alt)
-                print("---------------------")
+                print("Accel:", ax, ay, az)
 
             else:
-                print("Bad packet format:", msg)
+                print("Unknown packet type:", msg)
 
         except Exception as e:
             print("Decode error:", e)
