@@ -1,29 +1,32 @@
+from radio import Radio
+import time
 from machine import Pin, I2C
 from time import sleep_ms
 from lib.MPU6050 import MPU6050
 from lib.BME280 import BME280
 
 # =========================
+# RADIO
+# =========================
+radio = Radio()
+print("TX ready")
+
+# =========================
 # I2C SETUP
 # =========================
 i2c = I2C(1, scl=Pin(7), sda=Pin(6), freq=400000)
 
-print("I2C Scan:", i2c.scan())
-
 mpu = MPU6050(i2c)
 bme = BME280(i2c=i2c)
 
-print("MPU6050 + BME280 initialized")
+print("Sensors initialized")
 
 # =========================
-# GYRO CALIBRATION
+# CALIBRATION
 # =========================
-print("Calibrating gyro... keep sensor still")
+print("Calibrating gyro...")
 
-gx_off = 0
-gy_off = 0
-gz_off = 0
-
+gx_off = gy_off = gz_off = 0
 samples = 200
 
 for _ in range(samples):
@@ -39,18 +42,9 @@ gz_off /= samples
 
 print("Gyro offsets:", gx_off, gy_off, gz_off)
 
-# =========================
-# BARO CALIBRATION
-# =========================
-print("Calibrating ground pressure...")
+print("Calibrating pressure...")
 bme.calibrate(samples=100, delay_ms=20)
 
-print("Baseline:", bme.baseline_pressure)
-print("Altitude zeroed!\n")
-
-# =========================
-# FILTERS
-# =========================
 last_alt = 0.0
 
 def smooth(new, old):
@@ -62,14 +56,7 @@ def to_feet(m):
 # =========================
 # MAIN LOOP
 # =========================
-from radio import Radio
-import time
-
-radio = Radio()
-
 counter = 0
-
-print("TX ready")
 
 while True:
 
@@ -83,38 +70,20 @@ while True:
 
     # -------- BME --------
     temp, press, hum = bme.read_compensated_data()
-
-    # altitude (meters)
     alt_m = bme.altitude(press)
 
-    # deadband FIRST (important fix)
     if abs(alt_m) < 0.5:
         alt_m = 0
 
-    # smoothing AFTER deadband
     alt_m = smooth(alt_m, last_alt)
     last_alt = alt_m
 
-    # convert to feet
     alt_ft = to_feet(alt_m)
-
-    # for display only
-    alt_ft_print = round(alt_ft, 3)
-
-    # =========================
-    # PRINT DEBUG
-    # =========================
-    print("---- BME ----")
-    print("Temp:", temp)
-    print("Pressure:", press)
-    print("Humidity:", hum)
-    print("Altitude:", "{:.3f} ft".format(alt_ft_print))
-    print()
 
     # =========================
     # PACKET
     # =========================
-    packet = "AVO,{:.2f},{:.2f},{:.2f},{:.3f},{:.2f},{:.2f},{:.2f}".format(
+    msg = "AVO,{:.2f},{:.2f},{:.2f},{:.3f},{:.2f},{:.2f},{:.2f}".format(
         gx, gy, gz,
         alt_ft,
         accel['x'],
@@ -122,14 +91,9 @@ while True:
         accel['z']
     )
 
-    print(packet)
-    print("-------------------\n")
-
-    sleep_ms(50)
-    msg = "AVO|{}".format(counter)
-
     print("Sending:", msg)
+
     radio.send(msg.encode())
 
     counter += 1
-    time.sleep(0.2)
+    sleep_ms(50)
