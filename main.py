@@ -10,8 +10,17 @@ while True:
         data = radio.recv()
         if data:
             try:
-                print("Received:", data.decode())
-            except:
-                print("Received raw:", data)
+                msg = data.decode()
+                parts = msg.split("|")
+
+                if parts[0] == "AVO":
+                    counter = parts[1]
+                    print("Packet OK → Counter:", counter)
+
+                else:
+                    print("Unknown packet:", msg)
+
+            except Exception as e:
+                print("Decode error:", e)
 
     time.sleep(0.05)
