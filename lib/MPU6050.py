@@ -1,106 +1,232 @@
-from machine import I2C
-import time
-from math import pow
+# Class to read data from the (GY-521) MPU6050 Accelerometer/Gyro Module
+# Ported to MicroPython by Warayut Poomiwatracanont JAN 2023
+# Original repo https://github.com/nickcoutsos/MPU-6050-Python
+# and https://github.com/CoreElectronics/CE-PiicoDev-MPU6050-MicroPython-Module
 
-BME280_ADDRESS = 0x76
+from math import sqrt, atan2
+from machine import Pin, I2C
+from time import sleep_ms
 
-REG_DATA = 0xF7
-REG_CONTROL = 0xF4
-REG_CONTROL_HUM = 0xF2
-REG_CONFIG = 0xF5
+error_msg = "\nError \n"
+i2c_err_str = "MPU6050 communication error at address 0x{:02X}"
 
+# Global Variables
+_GRAVITIY_MS2 = 9.80665
 
-class BME280:
-    def __init__(self, i2c, address=BME280_ADDRESS):
-        self.i2c = i2c
-        self.addr = address
+# Scale Modifiers
+_ACC_SCLR_2G = 16384.0
+_ACC_SCLR_4G = 8192.0
+_ACC_SCLR_8G = 4096.0
+_ACC_SCLR_16G = 2048.0
 
-        # calibration data
-        self.dig_T1 = self._read16(0x88)
-        self.dig_T2 = self._readS16(0x8A)
-        self.dig_T3 = self._readS16(0x8C)
+_GYR_SCLR_250DEG = 131.0
+_GYR_SCLR_500DEG = 65.5
+_GYR_SCLR_1000DEG = 32.8
+_GYR_SCLR_2000DEG = 16.4
 
-        self.dig_P1 = self._read16(0x8E)
-        self.dig_P2 = self._readS16(0x90)
-        self.dig_P3 = self._readS16(0x92)
-        self.dig_P4 = self._readS16(0x94)
-        self.dig_P5 = self._readS16(0x96)
-        self.dig_P6 = self._readS16(0x98)
-        self.dig_P7 = self._readS16(0x9A)
-        self.dig_P8 = self._readS16(0x9C)
-        self.dig_P9 = self._readS16(0x9E)
+# Pre-defined ranges
+_ACC_RNG_2G = 0x00
+_ACC_RNG_4G = 0x08
+_ACC_RNG_8G = 0x10
+_ACC_RNG_16G = 0x18
 
-        self.dig_H1 = self._read8(0xA1)
+_GYR_RNG_250DEG = 0x00
+_GYR_RNG_500DEG = 0x08
+_GYR_RNG_1000DEG = 0x10
+_GYR_RNG_2000DEG = 0x18
 
-        self.t_fine = 0
+# MPU-6050 Registers
+_PWR_MGMT_1 = 0x6B
 
-        # init sensor
-        self.i2c.writeto_mem(self.addr, REG_CONTROL_HUM, b"\x01")
-        self.i2c.writeto_mem(self.addr, REG_CONTROL, b"\x27")
-        self.i2c.writeto_mem(self.addr, REG_CONFIG, b"\xA0")
+_ACCEL_XOUT0 = 0x3B
 
-        self.sea_level = 101325  # Pa
+_TEMP_OUT0 = 0x41
 
-    # ---------- raw reads ----------
-    def _read8(self, reg):
-        return self.i2c.readfrom_mem(self.addr, reg, 1)[0]
+_GYRO_XOUT0 = 0x43
 
-    def _read16(self, reg):
-        data = self.i2c.readfrom_mem(self.addr, reg, 2)
-        return data[0] | (data[1] << 8)
+_ACCEL_CONFIG = 0x1C
+_GYRO_CONFIG = 0x1B
 
-    def _readS16(self, reg):
-        val = self._read16(reg)
-        if val > 32767:
-            val -= 65536
-        return val
+_maxFails = 3
 
-    def read_raw(self):
-        data = self.i2c.readfrom_mem(self.addr, REG_DATA, 8)
+# Address
+_MPU6050_ADDRESS = 0x68
 
-        adc_p = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4)
-        adc_t = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
-        adc_h = (data[6] << 8) | data[7]
+def signedIntFromBytes(x, endian="big"):
+    y = int.from_bytes(x, endian) # type: ignore
+    if (y >= 0x8000):
+        return -((65535 - y) + 1)
+    else:
+        return y
+    
 
-        return adc_t, adc_p, adc_h
+class MPU6050(object):
 
-    # ---------- main API ----------
-    def read_compensated_data(self):
-        adc_t, adc_p, adc_h = self.read_raw()
+    def __init__(self, i2c=None, addr=_MPU6050_ADDRESS):
+        self.addr = addr
 
-        # temp
-        var1 = (((adc_t >> 3) - (self.dig_T1 << 1)) * self.dig_T2) >> 11
-        var2 = (((((adc_t >> 4) - self.dig_T1) *
-                 ((adc_t >> 4) - self.dig_T1)) >> 12) *
-                self.dig_T3) >> 14
-
-        self.t_fine = var1 + var2
-        temp = (self.t_fine * 5 + 128) >> 8
-        temp_c = temp / 100.0
-
-        # pressure
-        var1 = self.t_fine - 128000
-        var2 = var1 * var1 * self.dig_P6
-        var2 += (var1 * self.dig_P5) << 17
-        var2 += self.dig_P4 << 35
-        var1 = ((var1 * var1 * self.dig_P3) >> 8) + ((var1 * self.dig_P2) << 12)
-        var1 = (((1 << 47) + var1) * self.dig_P1) >> 33
-
-        if var1 == 0:
-            pressure = 0
+        if i2c is None:
+            from machine import Pin, I2C
+            self.i2c = I2C(0, scl=Pin(5), sda=Pin(4), freq=400000)
         else:
-            p = 1048576 - adc_p
-            p = ((p << 31) - var2) * 3125 // var1
-            var1 = (self.dig_P9 * (p >> 13) * (p >> 13)) >> 25
-            var2 = (self.dig_P8 * p) >> 19
-            pressure = ((p + var1 + var2) >> 8)
+            self.i2c = i2c
 
-        hum = adc_h
+        try:
+            self.i2c.writeto_mem(self.addr, _PWR_MGMT_1, bytes([0x00]))
+            sleep_ms(5)
+        except Exception as e:
+            print(i2c_err_str.format(self.addr))
+            print(error_msg)
+            raise e
 
-        return temp, pressure, hum
+        self._accel_range = self.get_accel_range(True)
+        self._gyro_range = self.get_gyro_range(True)
+        self._failCount = 0
+        self._terminatingFailCount = 0
+    
+    def _readData(self, register):
+        failCount = 0
+        while failCount < _maxFails:
+            try:
+                sleep_ms(10)
+                data = self.i2c.readfrom_mem(self.addr, register, 6)
+                break
+            except:
+                failCount = failCount + 1
+                self._failCount = self._failCount + 1
+                if failCount >= _maxFails:
+                    self._terminatingFailCount = self._terminatingFailCount + 1
+                    print(i2c_err_str.format(self.addr))
+                    return {"x": float("NaN"), "y": float("NaN"), "z": float("NaN")} 
+        x = signedIntFromBytes(data[0:2])
+        y = signedIntFromBytes(data[2:4])
+        z = signedIntFromBytes(data[4:6])
+        return {"x": x, "y": y, "z": z}
 
-    # ---------- altitude ----------
-    @property
-    def altitude(self):
-        _, pressure, _ = self.read_compensated_data()
-        return 44330 * (1.0 - pow(pressure / self.sea_level, 0.1903))
+    # Reads the temperature from the onboard temperature sensor of the MPU-6050.
+    # Returns the temperature [degC].
+    def read_temperature(self):
+        try:
+            rawData = self.i2c.readfrom_mem(self.addr, _TEMP_OUT0, 2)
+            raw_temp = (signedIntFromBytes(rawData, "big"))
+        except:
+            print(i2c_err_str.format(self.addr))
+            return float("NaN")
+        actual_temp = (raw_temp / 340) + 36.53
+        return actual_temp
+
+    # Sets the range of the accelerometer
+    # accel_range : the range to set the accelerometer to. Using a pre-defined range is advised.
+    def set_accel_range(self, accel_range):
+        self.i2c.writeto_mem(self.addr, _ACCEL_CONFIG, bytes([accel_range]))
+        self._accel_range = accel_range
+
+    # Gets the range the accelerometer is set to.
+    # raw=True: Returns raw value from the ACCEL_CONFIG register
+    # raw=False: Return integer: -1, 2, 4, 8 or 16. When it returns -1 something went wrong.
+    def get_accel_range(self, raw = False):
+        # Get the raw value
+        raw_data = self.i2c.readfrom_mem(self.addr, _ACCEL_CONFIG, 1)
+        
+        if raw is True:
+            return raw_data[0]
+        elif raw is False:
+            if raw_data[0] == _ACC_RNG_2G:
+                return 2
+            elif raw_data[0] == _ACC_RNG_4G:
+                return 4
+            elif raw_data[0] == _ACC_RNG_8G:
+                return 8
+            elif raw_data[0] == _ACC_RNG_16G:
+                return 16
+            else:
+                return -1
+
+    # Reads and returns the AcX, AcY and AcZ values from the accelerometer.
+    # Returns dictionary data in g or m/s^2 (g=False)
+    def read_accel_data(self, g = False):         
+        accel_data = self._readData(_ACCEL_XOUT0)
+        accel_range = self._accel_range
+        scaler = None
+        if accel_range == _ACC_RNG_2G:
+            scaler = _ACC_SCLR_2G
+        elif accel_range == _ACC_RNG_4G:
+            scaler = _ACC_SCLR_4G
+        elif accel_range == _ACC_RNG_8G:
+            scaler = _ACC_SCLR_8G
+        elif accel_range == _ACC_RNG_16G:
+            scaler = _ACC_SCLR_16G
+        else:
+            print("Unkown range - scaler set to _ACC_SCLR_2G")
+            scaler = _ACC_SCLR_2G
+
+        x = accel_data["x"] / scaler
+        y = accel_data["y"] / scaler
+        z = accel_data["z"] / scaler
+
+        if g is True:
+            return {"x": x, "y": y, "z": z}
+        elif g is False:
+            x = x * _GRAVITIY_MS2
+            y = y * _GRAVITIY_MS2
+            z = z * _GRAVITIY_MS2
+            return {"x": x, "y": y, "z": z}
+
+    def read_accel_abs(self, g=False):
+        d=self.read_accel_data(g)
+        return sqrt(d["x"]**2+d["y"]**2+d["z"]**2) # type: ignore
+
+    def set_gyro_range(self, gyro_range):
+        self.i2c.writeto_mem(self.addr, _GYRO_CONFIG, bytes([gyro_range]))
+        self._gyro_range = gyro_range
+
+    # Gets the range the gyroscope is set to.
+    # raw=True: return raw value from GYRO_CONFIG register
+    # raw=False: return range in deg/s
+    def get_gyro_range(self, raw = False):
+        # Get the raw value
+        raw_data = self.i2c.readfrom_mem(self.addr, _GYRO_CONFIG, 1)
+
+        if raw is True:
+            return raw_data[0]
+        elif raw is False:
+            if raw_data[0] == _GYR_RNG_250DEG:
+                return 250
+            elif raw_data[0] == _GYR_RNG_500DEG:
+                return 500
+            elif raw_data[0] == _GYR_RNG_1000DEG:
+                return 1000
+            elif raw_data[0] == _GYR_RNG_2000DEG:
+                return 2000
+            else:
+                return -1
+
+    # Gets and returns the GyX, GyY and GyZ values from the gyroscope.
+    # Returns the read values in a dictionary.
+    def read_gyro_data(self):
+        gyro_data = self._readData(_GYRO_XOUT0)
+        gyro_range = self._gyro_range
+        scaler = None
+        if gyro_range == _GYR_RNG_250DEG:
+            scaler = _GYR_SCLR_250DEG
+        elif gyro_range == _GYR_RNG_500DEG:
+            scaler = _GYR_SCLR_500DEG
+        elif gyro_range == _GYR_RNG_1000DEG:
+            scaler = _GYR_SCLR_1000DEG
+        elif gyro_range == _GYR_RNG_2000DEG:
+            scaler = _GYR_SCLR_2000DEG
+        else:
+            print("Unkown range - scaler set to _GYR_SCLR_250DEG")
+            scaler = _GYR_SCLR_250DEG
+
+        x = gyro_data["x"] / scaler
+        y = gyro_data["y"] / scaler
+        z = gyro_data["z"] / scaler
+
+        return {"x": x, "y": y, "z": z}
+
+    def read_angle(self): # returns radians. orientation matches silkscreen
+        a=self.read_accel_data()
+        x=atan2(a["y"],a["z"]) # type: ignore
+        y=atan2(-a["x"],a["z"]) # type: ignore
+        return {"x": x, "y": y}
