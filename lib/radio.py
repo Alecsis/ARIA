@@ -13,7 +13,7 @@ class Radio:
         ce_pin=27,
         csn_pin=28,
         channel=46,
-        payload_size=16,
+        payload_size=32,
         pipe_tx=b"\xe1\xf0\xf0\xf0\xf0",
         pipe_rx=b"\xe1\xf0\xf0\xf0\xf0"
     ):

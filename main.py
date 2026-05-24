@@ -1,5 +1,6 @@
 from radio import Radio
 import time
+import struct # <-- ADD THIS
 
 radio = Radio()
 print("RX ready")
@@ -7,43 +8,31 @@ print("RX ready")
 while True:
     if radio.available():
         data = radio.recv()
+        
         if not data:
             continue
 
-        try:
-            msg = data.decode(errors="ignore").strip()
-            print("RAW:", msg)
+        # Ensure we received the full 32-byte payload before unpacking
+        if len(data) == 32:
+            try:
+                # UNPACK THE 32 BYTES
+                unpacked = struct.unpack('<I7f', data)
+                
+                counter = unpacked[0]
+                gx, gy, gz = unpacked[1], unpacked[2], unpacked[3]
+                alt = unpacked[4]
+                ax, ay, az = unpacked[5], unpacked[6], unpacked[7]
 
-            parts = msg.split("|")
+                print("----- PACKET OK -----")
+                print(f"Counter: {counter}")
+                print(f"Gyro:    {gx:.2f}, {gy:.2f}, {gz:.2f}")
+                print(f"Accel:   {ax:.2f}, {ay:.2f}, {az:.2f}")
+                print(f"Alt(ft): {alt:.2f}")
+                print("---------------------")
 
-            if len(parts) != 9:
-                print("Bad packet length:", len(parts))
-                continue
+            except Exception as e:
+                print("Decode error:", e)
+        else:
+            print("Received malformed packet length:", len(data))
 
-            if parts[0] != "AVO":
-                print("Non-AVO packet:", msg)
-                continue
-
-            counter = int(parts[1])
-
-            gx = float(parts[2])
-            gy = float(parts[3])
-            gz = float(parts[4])
-
-            alt = float(parts[5])
-
-            ax = float(parts[6])
-            ay = float(parts[7])
-            az = float(parts[8])
-
-            print("----- PACKET OK -----")
-            print("Counter:", counter)
-            print("Gyro:", gx, gy, gz)
-            print("Accel:", ax, ay, az)
-            print("Alt(ft):", alt)
-            print("---------------------")
-
-        except Exception as e:
-            print("Decode error:", e)
-
-    time.sleep(0.05)
+    time.sleep(0.01) # Faster poll rate on the receiver side
