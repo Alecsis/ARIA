@@ -1,35 +1,33 @@
 import processing.serial.*;
-import java.nio.ByteBuffer; // <-- Needed for byte conversion
-import java.nio.ByteOrder;  // <-- Needed for Little-Endian format
 
 // ==========================================
 // CONFIGURATION & SWITCHES
 // ==========================================
 Serial port;
-boolean useSerial = true; // Set true when hardware is active
-String serialPortName = "COM4"; // Make sure this matches your Ground COM port
+boolean useSerial = true;
+String serialPortName = "COM3";
 int baudRate = 115200;
-float altMin = 0;
-float altMax = 10;
-float altGroundOffset = 0;
-boolean altInitialized = false;
-int lastPacketTime = 0;
-int lastReconnectAttempt = 0; // Tracks reconnection interval rates
 
 // ==========================================
 // TELEMETRY & RUNTIME STATE VARIABLES
 // ==========================================
 String flightState = "GROUND IDLE";
 float pitch = 0, roll = 0, yaw = 0;
-float altitude = 0, vSpeed = 0, tempC = 17.3;
-float accelX = 0, accelY = 0, accelZ = 1.0; // Fixed: MPU6050 rest state is 1.0G, not 9.81
+float altitude = 0;
 float aviBatt = 8.47, propBatt = 30.12;
+float vnImuT = 17.3, baroT = 15.4;
 int signalDbm = -36;
 
+// Extended Telemetry to fill out old layout specs
+float accX = 0.00, accY = 0.00, accZ = 1.00;
+float vX = 0.16, vY = -0.19, vZ = -93.70;
+float pX = -1.41, pY = 2.82;
+
 int packetCount = 0;
-float tlmRate = 0;
+float tlmRate = 7.0;
 int lastHzCheckTime = 0;
 int lastPacketCount = 0;
+int lastPacketTime = 0;
 
 // Mission Stopwatch Variables
 boolean isLaunched = false;
@@ -39,35 +37,29 @@ String stopwatchStr = "T+ 00:00:00";
 // Offsets for Zeroing Logic
 float pitchOffset = 0, rollOffset = 0, yawOffset = 0;
 
-// Multiple Plot History Streams (For the multi-graph array)
+// Multiple Plot History Streams
 int maxPoints = 120;
-float[][] gyroHist = new float[3][maxPoints]; // [X, Y, Z]
-float[][] accelHist = new float[3][maxPoints]; // [X, Y, Z]
+float[][] gyroHist = new float[3][maxPoints]; // 0=pitch, 1=roll, 2=yaw
 float[] altHist = new float[maxPoints];
 int histIdx = 0;
 float previousAlt = 0;
 
 // ==========================================
-// COLOR PALETTE (SPRITE Mission Control Theme)
+// COLOR PALETTE
 // ==========================================
 color BG_COLOR      = color(10, 10, 10);
-color PANEL_BORDER  = color(60, 60, 60);
+color PANEL_BORDER  = color(40, 40, 40);
 color STATE_BLUE    = color(74, 144, 226); 
 color TEXT_MAIN     = color(230, 230, 230);
-color TEXT_MUTED    = color(130, 130, 130);
+color TEXT_MUTED    = color(100, 100, 100);
 color BTN_BG        = color(25, 25, 25);
 color BTN_HOVER     = color(45, 45, 45);
-
-// Launch Mechanics Coloring Assets
 color LAUNCH_RED    = color(219, 68, 85);
 color LAUNCH_HOVER  = color(245, 93, 109);
-
-// Graph Line Colors
 color LINE_RED      = color(219, 68, 85);
 color LINE_YELLOW   = color(244, 180, 26);
 color LINE_GREEN    = color(15, 157, 88);
 
-// Typography Font Fields
 PFont UI_Font_Bold;
 
 // ==========================================
@@ -75,7 +67,7 @@ PFont UI_Font_Bold;
 // ==========================================
 void setup() {
   size(1280, 720, P3D);
-  frameRate(165);
+  frameRate(60);
   UI_Font_Bold = createFont("SF Pro Text Bold", 13, true);
   textFont(UI_Font_Bold);
   
@@ -84,17 +76,17 @@ void setup() {
   }
 }
 
-// Helper method to isolate serial connection initialization
 void tryInitSerial() {
   try {
     if (port != null) {
-      port.stop(); // Clean up old reference if it exists
+      port.stop();
     }
     port = new Serial(this, serialPortName, baudRate);
-    lastPacketTime = millis(); // Reset timer on successful bind
-    println("Serial link successfully established on " + serialPortName);
+    port.bufferUntil('\n');
+    lastPacketTime = millis();
+    println("Serial connected to " + serialPortName);
   } catch (Exception e) {
-    println("Serial setup failed on " + serialPortName + ": " + e.getMessage());
+    println("Serial failed: " + e.getMessage());
   }
 }
 
@@ -107,7 +99,6 @@ void draw() {
   hint(DISABLE_DEPTH_TEST);
   
   if (useSerial) {
-    readSerialTelemetry();
     checkSerialWatchdog(); 
   } else {
     simulateTelemetry();
@@ -115,7 +106,7 @@ void draw() {
   calculateTlmRate();
   updateMissionStopwatch();
   
-  // Render Panels
+  // Render Old-Style Layout Structure
   drawTopHorizontalGraphs();
   drawLeftVerticalGraphs();
   
@@ -127,178 +118,123 @@ void draw() {
   drawTopBranding();
 }
 
-// ==========================================
-// WATCHDOG RECONNECT STRATEGY
-// ==========================================
 void checkSerialWatchdog() {
   int timeSinceLastPacket = millis() - lastPacketTime;
-  
   if (timeSinceLastPacket > 2000) {
-    tlmRate = 0.0; 
-    
-    if (millis() - lastReconnectAttempt > 2000) {
-      println("Link timeout detected (" + nf(timeSinceLastPacket/1000.0, 1, 1) + "s). Attempting hardware reconnection...");
-      lastReconnectAttempt = millis();
-      tryInitSerial();
-    }
+    tlmRate = 0.0;
   }
 }
 
-// Keep track of timing between radio packets for the math integration
-int lastPacketTimestampMicros = 0; 
-
 // ==========================================
-// BINARY TELEMETRY PARSER ENGINE
+// SERIAL EVENT PARSING
 // ==========================================
-void readSerialTelemetry() {
-  if (port == null) return;
-
-  // Read lines from the serial buffer
-  while (port.available() > 0) {
-    String inString = port.readStringUntil('\n');
+void serialEvent(Serial p) {
+  String data = p.readStringUntil('\n');
+  if (data != null) {
+    data = trim(data);
+    if (data.startsWith("#")) return;
     
-    if (inString != null) {
-      inString = trim(inString);
-      
-      try {
-        // 1. Parse Gyroscope Line
-        if (inString.contains("Gyro (Pitch/Roll/Yaw):")) {
-  String data = inString.replace("Gyro (Pitch/Roll/Yaw):", "").trim();
-  float[] values = float(split(data, ','));
-  if (values.length >= 3) {
-    // Gyro rates: values[0] = pitch rate, values[1] = roll rate, values[2] = yaw rate
-    float gyroPitchRate = values[1];
-    float gyroRollRate = values[0];
-    float gyroYawRate = values[2];
-    
-    // TIMING DELTA FOR INTEGRATION
-    int nowMillis = millis();
-    float dt = (nowMillis - lastPacketTime) / 1000.0f;
-    if (dt <= 0 || dt > 0.2) dt = 0.02f;
-    lastPacketTime = nowMillis;
-    packetCount++;
-
-    // SIMPLE GYRO INTEGRATION FIRST (for testing)
-    // Remove the complementary filter temporarily to debug
-    pitch += gyroPitchRate * dt;
-    roll  += gyroRollRate * dt;
-    yaw   += gyroYawRate * dt;
-    
-    // Normalize angles to -180 to 180 range
-    if (pitch > 180) pitch -= 360;
-    if (pitch < -180) pitch += 360;
-    if (roll > 180) roll -= 360;
-    if (roll < -180) roll += 360;
-    if (yaw > 180) yaw -= 360;
-    if (yaw < -180) yaw += 360;
-    
-    // Update Graph History
-    gyroHist[0][histIdx] = pitch;  
-    gyroHist[1][histIdx] = roll;
-    gyroHist[2][histIdx] = yaw;
-  }
-}
+    if (data.contains("/")) {
+      String[] parts = split(data, '/');
+      if (parts.length >= 3) {
+        roll = float(parts[0]);
+        pitch = float(parts[1]);
+        yaw = float(parts[2]);
         
-        // 2. Parse Accelerometer Line
-        else if (inString.contains("Accel(Pitch/Roll/Yaw):")) {
-          String data = inString.replace("Accel(Pitch/Roll/Yaw):", "").trim();
-          float[] values = float(split(data, ','));
-          if (values.length >= 3) {
-            // Your Python code sends: tx_ax, tx_ay, tx_az
-            // Where: tx_ax = accel['z'] (physical Z = pitch axis)
-            //        tx_ay = accel['y'] (physical Y = roll axis)
-            //        tx_az = accel['x'] (physical X = vertical)
-            accelX = values[0];  // Pitch acceleration (G's)
-            accelY = values[1];  // Roll acceleration (G's)
-            accelZ = values[2];  // Vertical acceleration (G's)
-            
-            // Maintain scrolling history
-            histIdx = (histIdx + 1) % maxPoints;
-            accelHist[0][histIdx] = accelX;
-            accelHist[1][histIdx] = accelY;
-            accelHist[2][histIdx] = accelZ;
-          }
-        } 
+        gyroHist[0][histIdx] = pitch;
+        gyroHist[1][histIdx] = roll;
+        gyroHist[2][histIdx] = yaw;
+        histIdx = (histIdx + 1) % maxPoints;
         
-        // 3. Parse Altitude Line
-        else if (inString.contains("Alt(ft):")) {
-          String data = inString.replace("Alt(ft):", "").trim();
-          altitude = float(data);
-          altHist[histIdx] = altitude;
-          
-          // AUTO FLIGHT STATE MACHINE ENTRY
-          if (altitude > 2.0 && !isLaunched) {
-            isLaunched = true;
-            launchTimeMarker = millis();
-          }
-          
-          if (!isLaunched && altitude < 1.0) {
-            flightState = "GROUND IDLE";
-          } else if (isLaunched) {
-            if (altitude >= previousAlt) {
-              flightState = "POWERED FLIGHT / BOOST";
-            } else if (altitude < previousAlt && altitude > 2.0) {
-              flightState = "DESCENT / RECOVERY";
-            } else if (altitude <= 2.0) {
-              flightState = "TOUCHDOWN / GROUND";
-              isLaunched = false; // Reset for next flight
-            }
-          }
-          previousAlt = altitude;
-        }
-        
-      } catch (Exception e) {
-        println("String Format Parse Error: " + e.getMessage());
+        packetCount++;
+        lastPacketTime = millis();
       }
     }
+    else if (data.contains("Alt(ft):")) {
+      String altStr = data.replace("Alt(ft):", "").trim();
+      altitude = float(altStr);
+      altHist[histIdx] = altitude;
+      
+      if (altitude > 2.0 && !isLaunched) {
+        isLaunched = true;
+        launchTimeMarker = millis();
+      }
+      
+      if (!isLaunched && altitude < 1.0) {
+        flightState = "GROUND IDLE";
+      } else if (isLaunched) {
+        if (altitude >= previousAlt) {
+          flightState = "POWERED FLIGHT / BOOST";
+        } else if (altitude < previousAlt && altitude > 2.0) {
+          flightState = "DESCENT / RECOVERY";
+        } else if (altitude <= 2.0) {
+          flightState = "TOUCHDOWN / GROUND";
+          isLaunched = false;
+        }
+      }
+      previousAlt = altitude;
+    }
   }
 }
+
 // ==========================================
-// RUNTIME UTILS: STOPWATCH TRACKING
+// RUNTIME UTILS
 // ==========================================
 void updateMissionStopwatch() {
   if (isLaunched) {
     int elapsedMillis = millis() - launchTimeMarker;
-    
     int totalSecs = elapsedMillis / 1000;
     int mins = totalSecs / 60;
     int secs = totalSecs % 60;
     int hundredths = (elapsedMillis % 1000) / 10;
-    
     stopwatchStr = "T+ " + nf(mins, 2) + ":" + nf(secs, 2) + ":" + nf(hundredths, 2);
   } else {
     stopwatchStr = "T+ 00:00:00";
   }
 }
 
+void calculateTlmRate() {
+  int currentTime = millis();
+  if (currentTime - lastHzCheckTime >= 1000) {
+    tlmRate = (packetCount - lastPacketCount) / ((currentTime - lastHzCheckTime) / 1000.0);
+    lastPacketCount = packetCount;
+    lastHzCheckTime = currentTime;
+  }
+}
+
 // ==========================================
-// TOP ROW: MULTIPLE SMALL GRAPHS & BRANDING
+// RENDER OLD INTERFACE PANELS
 // ==========================================
 void drawTopHorizontalGraphs() {
-  int graphWidth = 165;
-  int graphHeight = 100;
+  int graphW = 133;
+  int graphH = 100;
   int startY = 10;
   
-  drawPanelOutline(10, startY, graphWidth, graphHeight, "VN IMU Gyros");
-  drawMultiStreamGraphWithAxis(10, startY, graphWidth, graphHeight, gyroHist, 3, new color[]{LINE_RED, LINE_YELLOW, LINE_GREEN});
+  // Panel 1: VN IMU Gyros
+  drawPanelOutline(10, startY, graphW, graphH, "VN IMU Gyros");
+  drawMultiStreamGraphWithAxis(10, startY, graphW, graphH, gyroHist, 3, new color[]{LINE_GREEN, LINE_RED, LINE_YELLOW});
 
-  drawPanelOutline(185, startY, graphWidth, graphHeight, "VN IMU Accels");
-  drawMultiStreamGraphWithAxis(185, startY, graphWidth, graphHeight, accelHist, 3, new color[]{LINE_RED, LINE_YELLOW, LINE_GREEN});
+  // Panel 2: VN IMU Accels
+  drawPanelOutline(148, startY, graphW, graphH, "VN IMU Accels");
+  drawMultiStreamGraphWithAxis(148, startY, graphW, graphH, gyroHist, 3, new color[]{LINE_GREEN, LINE_RED, LINE_YELLOW});
 
-  drawPanelOutline(360, startY, graphWidth, graphHeight, "Body Orientation X");
-  drawMultiStreamGraphWithAxis(360, startY, graphWidth, graphHeight, gyroHist, 1, new color[]{LINE_YELLOW}, 0);
+  // Panel 3: Body Orientation X
+  drawPanelOutline(286, startY, graphW, graphH, "Body Orientation X");
+  drawMultiStreamGraphWithAxis(286, startY, graphW, graphH, gyroHist, 1, new color[]{LINE_YELLOW}, 0);
 
-  drawPanelOutline(535, startY, graphWidth, graphHeight, "Body Orientation Y");
-  drawMultiStreamGraphWithAxis(535, startY, graphWidth, graphHeight, gyroHist, 1, new color[]{LINE_GREEN}, 1);
+  // Panel 4: Body Orientation Y
+  drawPanelOutline(424, startY, graphW, graphH, "Body Orientation Y");
+  drawMultiStreamGraphWithAxis(424, startY, graphW, graphH, gyroHist, 1, new color[]{LINE_GREEN}, 1);
 
-  drawPanelOutline(710, startY, graphWidth, graphHeight, "Body Orientation Z");
-  drawMultiStreamGraphWithAxis(710, startY, graphWidth, graphHeight, gyroHist, 1, new color[]{LINE_RED}, 2);
+  // Panel 5: Body Orientation Z
+  drawPanelOutline(562, startY, graphW, graphH, "Body Orientation Z");
+  drawMultiStreamGraphWithAxis(562, startY, graphW, graphH, gyroHist, 1, new color[]{LINE_RED}, 2);
 }
 
 void drawTopBranding() {
-  int brandX = 885;          
+  int brandX = 705;          
   int brandY = 10;           
-  int panelW = 385;          
+  int panelW = 390;          
   int panelH = 100;          
   
   drawPanelOutline(brandX, brandY, panelW, panelH, "");
@@ -313,12 +249,10 @@ void drawTopBranding() {
   text("Ground Control", brandX + (panelW / 2), brandY + 68);
 }
 
-// ==========================================
-// LEFT COLUMN: GRAPHS & CONDENSED PANEL
-// ==========================================
 void drawLeftVerticalGraphs() {
   int panelW = 210;
   
+  // State Window Box
   stroke(PANEL_BORDER);
   fill(0);
   rect(10, 120, panelW, 200);
@@ -336,37 +270,35 @@ void drawLeftVerticalGraphs() {
   textSize(11);
   text(flightState + " [" + stopwatchStr + "]", 15 + (panelW-10)/2, 142);
   
+  // Environmental Status Readouts
   fill(TEXT_MAIN);
   textSize(11);
-  int textX = 20;
+  int leftX = 20;
+  int rightX = 120;
   
   textAlign(LEFT, TOP);
-  text("AVI Batt:  " + nf(aviBatt, 1, 2) + " V", textX, 170);
-  text("Prop Batt: " + nf(propBatt, 1, 2) + " V", textX, 185);
-  text("VN IMU T:  " + nf(tempC, 1, 1) + " °C", textX, 200);
-  text("Baro T:    " + "15.4 °C", textX, 215);
+  text("AVI Batt: " + nf(aviBatt, 1, 2) + " V", leftX, 175);
+  text("Prop Batt: " + nf(propBatt, 1, 2) + " V", leftX, 192);
+  text("VN IMU T: " + nf(vnImuT, 1, 1) + " °C", leftX, 209);
+  text("Baro T:   " + nf(baroT, 1, 1) + " °C", leftX, 226);
   
-  textAlign(RIGHT, TOP);
-  text("Signal: " + signalDbm + " dBm", textX + 190, 170);
-  text("TLM Rate: " + nf(tlmRate, 1, 1) + " Hz", textX + 190, 185);
+  text("Signal: " + signalDbm + " dBm", rightX, 175);
+  text("TLM Rate: " + nf(tlmRate, 1, 1) + " Hz", rightX, 192);
 
-  int graphH = 115;
-  drawPanelOutline(10, 330, panelW, graphH, "Altitude");
-  drawSingleStreamGraphWithAxis(10, 330, panelW, graphH, altHist, LINE_YELLOW, "ft"); 
-  
-  drawPanelOutline(10, 455, panelW, graphH, "XY Position");
-  drawGraphScaleLabels(10, 455, panelW, graphH, "0.0", "0.0");
-  stroke(PANEL_BORDER, 90);
-  line(10 + 6, 455 + graphH / 2 + 5, 10 + panelW - 42, 455 + graphH / 2 + 5);
-  
-  drawPanelOutline(10, 580, panelW, graphH, "XY Velocity");
-  drawGraphScaleLabels(10, 580, panelW, graphH, "0.0", "0.0");
-  stroke(PANEL_BORDER, 90);
-  line(10 + 6, 580 + graphH / 2 + 5, 10 + panelW - 42, 580 + graphH / 2 + 5);
+  // Stacked Secondary History Plots
+  int itemH = 110;
+  drawPanelOutline(10, 330, panelW, itemH, "Altitude");
+  drawSingleStreamGraphWithAxis(10, 330, panelW, itemH, altHist, LINE_YELLOW, "ft"); 
+
+  drawPanelOutline(10, 450, panelW, itemH, "XY Position");
+  drawStaticBaselineGraph(10, 450, panelW, itemH);
+
+  drawPanelOutline(10, 570, panelW, itemH, "XY Velocity");
+  drawStaticBaselineGraph(10, 570, panelW, itemH);
 }
 
 // ==========================================
-// RENDER HELPERS WITH DYNAMIC SCALING & AXES
+// DATA HISTORY GRAPH PLOTTERS
 // ==========================================
 void drawSingleStreamGraphWithAxis(int x, int y, int w, int h, float[] data, color clr, String unit) {
   float minV = Float.MAX_VALUE;
@@ -379,23 +311,16 @@ void drawSingleStreamGraphWithAxis(int x, int y, int w, int h, float[] data, col
   }
   
   if (minV == Float.MAX_VALUE) { minV = -1.0; maxV = 1.0; }
-  
   float range = maxV - minV;
-  if (abs(range) < 0.001) { 
-    minV -= 1.0; 
-    maxV += 1.0; 
-  } else { 
-    minV -= range * 0.1; 
-    maxV += range * 0.1; 
-  }
+  if (abs(range) < 0.001) { minV -= 1.0; maxV += 1.0; } 
+  else { minV -= range * 0.1; maxV += range * 0.1; }
   
   drawGraphScaleLabels(x, y, w, h, nf(maxV, 1, 3) + " " + unit, nf(minV, 1, 3) + " " + unit);
   
   float axisY = map(0, minV, maxV, y + h - 12, y + 22);
   axisY = constrain(axisY, y + 22, y + h - 12);
-  stroke(PANEL_BORDER, 100);
-  strokeWeight(1);
-  line(x + 6, axisY, x + w - 42, axisY);
+  stroke(PANEL_BORDER, 120);
+  line(x + 6, axisY, x + w - 45, axisY);
   
   noFill();
   stroke(clr);
@@ -404,9 +329,7 @@ void drawSingleStreamGraphWithAxis(int x, int y, int w, int h, float[] data, col
   for (int i = 0; i < maxPoints; i++) {
     int idx = (histIdx + i) % maxPoints;
     float val = data[idx];
-    if (Float.isNaN(val) || Float.isInfinite(val)) val = 0;
-    
-    float graphX = map(i, 0, maxPoints, x + 6, x + w - 42);
+    float graphX = map(i, 0, maxPoints, x + 6, x + w - 45);
     float graphY = map(val, minV, maxV, y + h - 12, y + 22);
     vertex(graphX, graphY);
   }
@@ -426,30 +349,22 @@ void drawMultiStreamGraphWithAxis(int x, int y, int w, int h, float[][] data, in
   
   for (int s = startStream; s < endStream; s++) {
     for (int i = 0; i < maxPoints; i++) {
-      if (Float.isNaN(data[s][i]) || Float.isInfinite(data[s][i])) continue;
       if (data[s][i] < minV) minV = data[s][i];
       if (data[s][i] > maxV) maxV = data[s][i];
     }
   }
   
   if (minV == Float.MAX_VALUE) { minV = -1.0; maxV = 1.0; }
-  
   float range = maxV - minV;
-  if (abs(range) < 0.001) { 
-    minV -= 1.0; 
-    maxV += 1.0; 
-  } else { 
-    minV -= range * 0.1; 
-    maxV += range * 0.1; 
-  }
+  if (abs(range) < 0.001) { minV -= 1.0; maxV += 1.0; } 
+  else { minV -= range * 0.1; maxV += range * 0.1; }
   
   drawGraphScaleLabels(x, y, w, h, nf(maxV, 1, 3), nf(minV, 1, 3));
   
   float axisY = map(0, minV, maxV, y + h - 12, y + 22);
   axisY = constrain(axisY, y + 22, y + h - 12);
-  stroke(PANEL_BORDER, 100);
-  strokeWeight(1);
-  line(x + 6, axisY, x + w - 28, axisY);
+  stroke(PANEL_BORDER, 120);
+  line(x + 6, axisY, x + w - 32, axisY);
   
   int colorMapIdx = 0;
   for (int s = startStream; s < endStream; s++) {
@@ -460,9 +375,7 @@ void drawMultiStreamGraphWithAxis(int x, int y, int w, int h, float[][] data, in
     for (int i = 0; i < maxPoints; i++) {
       int idx = (histIdx + i) % maxPoints;
       float val = data[s][idx];
-      if (Float.isNaN(val) || Float.isInfinite(val)) val = 0;
-      
-      float graphX = map(i, 0, maxPoints, x + 6, x + w - 28);
+      float graphX = map(i, 0, maxPoints, x + 6, x + w - 32);
       float graphY = map(val, minV, maxV, y + h - 12, y + 22);
       vertex(graphX, graphY);
     }
@@ -471,41 +384,39 @@ void drawMultiStreamGraphWithAxis(int x, int y, int w, int h, float[][] data, in
   }
 }
 
+void drawStaticBaselineGraph(int x, int y, int w, int h) {
+  drawGraphScaleLabels(x, y, w, h, "0.0", "0.0");
+  stroke(PANEL_BORDER, 150);
+  line(x + 6, y + h - 25, x + w - 32, y + h - 25);
+}
+
 // ==========================================
-// CENTER VIEWPORT: 3D MODEL RENDER SPACE
+// 3D MODEL VIEWPORT (YOUR WORKING ROCKET)
 // ==========================================
 void drawCenter3DModelSpace() {
   stroke(PANEL_BORDER);
   fill(5);
-  rect(230, 120, 875, 575);
+  rect(230, 120, 865, 575);
   
   pushMatrix();
-  translate(230 + 875/2, 120 + 575/2, 150); 
+  translate(230 + 865/2, 120 + 575/2, 150);
   
   ambientLight(120, 120, 120);
   directionalLight(255, 255, 255, 0.5, 1, -1);
   
-  // Apply rotations in CORRECT order: Yaw -> Roll -> Pitch
-  // This matches how your sensor data is oriented
-  
-  // Yaw (rotate around vertical axis - FIXED inversion)
-  rotateY(radians(yaw - yawOffset));  // Removed the negative sign
-  
-  // Roll (rotate around X axis)
+  rotateY(radians(yaw - yawOffset));
+  rotateX(radians(pitch - pitchOffset));
   rotateZ(radians(roll - rollOffset));
   
-  // Pitch (rotate around Y axis)
-  rotateX(radians(pitch - pitchOffset));
-  
   stroke(40);
-  fill(240); 
+  fill(240);
   strokeWeight(1);
   
   int segments = 32;
   float radius = 35;
   float length = 260;
   
-  // Render Rocket Body Cylinder
+  // Rocket Cylinder Cylinder
   beginShape(QUAD_STRIP);
   for (int i = 0; i <= segments; i++) {
     float angle = TWO_PI * i / segments;
@@ -516,14 +427,14 @@ void drawCenter3DModelSpace() {
   }
   endShape();
   
-  // Render Rocket Nosecone
+  // Cap Nosecone
   pushMatrix();
   translate(0, -length/2, 0);
-  fill(210, 50, 50); 
+  fill(210, 50, 50);
   cone(radius, 65);
   popMatrix();
   
-  // Render Rocket Fins
+  // Stabilizer Fins
   fill(70);
   for(int i = 0; i < 4; i++) {
     pushMatrix();
@@ -537,11 +448,11 @@ void drawCenter3DModelSpace() {
 }
 
 // ==========================================
-// RIGHT PANEL: UTILITY SYSTEM INTERFACES
+// RIGHT PANEL (COMMANDS & RAW TELEMETRY OVERHAUL)
 // ==========================================
 void drawRightMetadataPanel() {
-  int panelX = 1115;
-  int panelW = 155;
+  int panelX = 1105;
+  int panelW = 165;
 
   drawPanelOutline(panelX, 120, panelW, 145, "System Commands");
   drawInteractiveButton(panelX + 10, 145, panelW - 20, 26, "ZERO GYROS");
@@ -551,38 +462,17 @@ void drawRightMetadataPanel() {
   drawPanelOutline(panelX, 275, panelW, 420, "Raw Telemetry");
   
   boolean isConnected = useSerial && (millis() - lastPacketTime < 2000);
-  
-  if (isConnected) {
-    fill(LINE_GREEN); 
-  } else {
-    fill(LAUNCH_RED);  
-  }
+  if (isConnected) { fill(LINE_GREEN); } else { fill(LAUNCH_RED); }
   noStroke();
-  rect(panelX + 10, 298, panelW - 20, 24); 
+  rect(panelX + 10, 298, panelW - 20, 24);
   
-  fill(0); 
+  fill(0);
   textAlign(CENTER, CENTER);
   textSize(9);
-  if (isConnected) {
-    text("STATUS: CONNECTED", panelX + (panelW / 2), 310);
-  } else {
-    text("STATUS: DISCONNECTED", panelX + (panelW / 2), 310);
-  }
+  text(isConnected ? "STATUS: CONNECTED" : "STATUS: DISCONNECTED", panelX + (panelW / 2), 310);
   
-  float secSinceLast = (millis() - lastPacketTime) / 1000.0;
-  if (!useSerial) secSinceLast = 0.0; 
-  
-  textAlign(CENTER, TOP);
-  textSize(9);
-  if (isConnected) {
-    fill(LINE_GREEN);
-    text("TIMEOUT: " + nf(secSinceLast, 1, 1) + "s", panelX + (panelW / 2), 327);
-  } else {
-    fill(LAUNCH_RED);
-    text("TIMEOUT: " + nf(secSinceLast, 1, 1) + "s", panelX + (panelW / 2), 327);
-  }
-  
-  int startY = 344; 
+  // Fully Detailed Text Readouts
+  int startY = 344;
   int spacing = 16;
   textSize(10);
   fill(TEXT_MAIN);
@@ -592,53 +482,42 @@ void drawRightMetadataPanel() {
   text("Roll:  " + nf(roll, 1, 2) + "°", panelX + 10, startY + spacing);
   text("Yaw:   " + nf(yaw, 1, 2) + "°", panelX + 10, startY + (spacing*2));
   
-  text("accX:  " + nf(accelX, 1, 2) + " g", panelX + 10, startY + (spacing*3));
-  text("accY:  " + nf(accelY, 1, 2) + " g", panelX + 10, startY + (spacing*4));
-  text("accZ:  " + nf(accelZ, 1, 2) + " g", panelX + 10, startY + (spacing*5));
+  text("accX:  " + nf(accX, 1, 2) + " g", panelX + 10, startY + (spacing*3));
+  text("accY:  " + nf(accY, 1, 2) + " g", panelX + 10, startY + (spacing*4));
+  text("accZ:  " + nf(accZ, 1, 2) + " g", panelX + 10, startY + (spacing*5));
   
-  text("vX:  0.16 g", panelX + 10, startY + (spacing*6));
-  text("vY: -0.19 g", panelX + 10, startY + (spacing*7));
-  text("vZ: -93.70 g", panelX + 10, startY + (spacing*8));
+  text("vX:    " + nf(vX, 1, 2) + " g", panelX + 10, startY + (spacing*6));
+  text("vY:   " + nf(vY, 1, 2) + " g", panelX + 10, startY + (spacing*7));
+  text("vZ:   " + nf(vZ, 1, 2) + " g", panelX + 10, startY + (spacing*8));
   
-  text("pX: -1.41 m", panelX + 10, startY + (spacing*9));
-  text("pY:  2.82 m", panelX + 10, startY + (spacing*10));
-  text("Alt: " + nf(altitude, 1, 1) + " ft", panelX + 10, startY + (spacing*11));
+  text("pX:   " + nf(pX, 1, 2) + " m", panelX + 10, startY + (spacing*9));
+  text("pY:    " + nf(pY, 1, 2) + " m", panelX + 10, startY + (spacing*10));
+  text("Alt:   " + nf(altitude, 1, 1) + " ft", panelX + 10, startY + (spacing*11));
 }
 
 // ==========================================
-// MOUSE INTERACTION HANDLING
+// LAYOUT INTERACTION & INTERFACE DECORATORS
 // ==========================================
 void mousePressed() {
-  int panelX = 1115;
-  
-  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 135 && mouseY >= 145 && mouseY <= 145 + 26) {
+  int panelX = 1105;
+  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 145 && mouseY >= 145 && mouseY <= 145 + 26) {
     pitchOffset = pitch; rollOffset = roll; yawOffset = yaw;
-    println("Command Broadcasted: IMU Orientation Axes Zeroed out.");
-    if(useSerial && port != null) port.write("CMD,ZERO_IMU\n"); 
+    println("ZERO GYROS - Offsets set");
   }
-  
-  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 135 && mouseY >= 182 && mouseY <= 182 + 26) {
+  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 145 && mouseY >= 182 && mouseY <= 182 + 26) {
     packetCount = 0; altitude = 0; previousAlt = 0;
-    isLaunched = false;
-    flightState = "GROUND IDLE";
-    println("Command Broadcasted: Purging local telemetry cache frames.");
-    if(useSerial && port != null) port.write("CMD,RESET_FLIGHT\n");
+    isLaunched = false; flightState = "GROUND IDLE";
+    println("RESET FLIGHT");
   }
-  
-  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 135 && mouseY >= 219 && mouseY <= 219 + 26) {
+  if (mouseX >= panelX + 10 && mouseX <= panelX + 10 + 145 && mouseY >= 219 && mouseY <= 219 + 26) {
     if (!isLaunched) {
-      isLaunched = true;
-      launchTimeMarker = millis();
+      isLaunched = true; launchTimeMarker = millis();
       flightState = "POWERED FLIGHT / BOOST";
-      println("CRITICAL COMMAND: Launch Sequence Initiated!");
-      if(useSerial && port != null) port.write("CMD,LAUNCH\n");
+      println("LAUNCH SEQUENCE INITIATED!");
     }
   }
 }
 
-// ==========================================
-// STANDALONE DRAW DRAWING BLOCKS UTILS
-// ==========================================
 void drawPanelOutline(int x, int y, int w, int h, String title) {
   stroke(PANEL_BORDER);
   strokeWeight(1);
@@ -646,7 +525,7 @@ void drawPanelOutline(int x, int y, int w, int h, String title) {
   rect(x, y, w, h);
   
   fill(TEXT_MUTED);
-  textSize(10); 
+  textSize(9);
   textAlign(LEFT, TOP);
   text(title, x + 8, y + 6);
 }
@@ -661,13 +540,10 @@ void drawGraphScaleLabels(int x, int y, int w, int h, String maxStr, String minS
 }
 
 void drawInteractiveButton(int x, int y, int w, int h, String label) {
-  if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) {
-    fill(BTN_HOVER);
-  } else {
-    fill(BTN_BG);
-  }
+  if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) { fill(BTN_HOVER); } 
+  else { fill(BTN_BG); }
   stroke(PANEL_BORDER);
-  rect(x, y, w, h, 3);
+  rect(x, y, w, h, 2);
   
   fill(TEXT_MAIN);
   textAlign(CENTER, CENTER);
@@ -676,77 +552,31 @@ void drawInteractiveButton(int x, int y, int w, int h, String label) {
 }
 
 void drawLaunchButton(int x, int y, int w, int h, String label) {
-  if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) {
-    fill(LAUNCH_HOVER);
-  } else {
-    fill(LAUNCH_RED);
-  }
+  if (mouseX >= x && mouseX <= x + w && mouseY >= y && mouseY <= y + h) { fill(LAUNCH_HOVER); } 
+  else { fill(LAUNCH_RED); }
   stroke(PANEL_BORDER);
-  rect(x, y, w, h, 3);
+  rect(x, y, w, h, 2);
   
-  fill(0); 
+  fill(0);
   textAlign(CENTER, CENTER);
   textSize(9);
   text(label, x + w/2, y + h/2 - 1);
 }
 
-// ==========================================
-// BACKGROUND TELEMETRY EMULATOR ENGINE
-// ==========================================
 void simulateTelemetry() {
   pitch = 8 * sin(frameCount * 0.03);
   roll  = 5 * cos(frameCount * 0.02);
   yaw   = (frameCount * 0.2) % 360;
+  altitude = isLaunched ? altitude + random(0.8, 2.2) : random(-0.02, 0.02);
+  if (altitude < 0) altitude = 0;
   
-  accelX = random(-0.02, 0.02);
-  accelY = random(-0.02, 0.02);
-  accelZ = 1.0 + random(-0.01, 0.01);
-  
-  if (isLaunched) {
-    altitude += random(0.8, 2.2); 
-  } else {
-    altitude = 0.0 + random(-0.02, 0.02); 
-  }
-  
-  histIdx = (histIdx + 1) % maxPoints;
   gyroHist[0][histIdx] = pitch;
   gyroHist[1][histIdx] = roll;
   gyroHist[2][histIdx] = yaw;
-  
-  accelHist[0][histIdx] = accelX;
-  accelHist[1][histIdx] = accelY;
-  accelHist[2][histIdx] = accelZ;
   altHist[histIdx] = altitude;
-  
-  if (altitude > 2.0 && !isLaunched) {
-    isLaunched = true;
-    launchTimeMarker = millis();
-  }
-  
-  if (!isLaunched && altitude < 1.0) {
-    flightState = "GROUND IDLE";
-  } else if (isLaunched) {
-    if (altitude >= previousAlt) {
-      flightState = "POWERED FLIGHT / BOOST";
-    } else if (altitude < previousAlt && altitude > 2.0) {
-      flightState = "DESCENT / RECOVERY";
-    } else if (altitude <= 2.0) {
-      flightState = "TOUCHDOWN / GROUND";
-    }
-  }
-  
-  previousAlt = altitude;
+  histIdx = (histIdx + 1) % maxPoints;
   
   if (frameCount % 4 == 0) packetCount++;
-}
-
-void calculateTlmRate() {
-  int currentTime = millis();
-  if (currentTime - lastHzCheckTime >= 1000) {
-    tlmRate = (packetCount - lastPacketCount) / ((currentTime - lastHzCheckTime) / 1000.0);
-    lastPacketCount = packetCount;
-    lastHzCheckTime = currentTime;
-  }
 }
 
 void cone(float r, float h) {
