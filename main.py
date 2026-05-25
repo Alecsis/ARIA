@@ -154,7 +154,6 @@ while True:
     pitch_acc_rel = wrap_angle(pitch_acc - pitch_offset)
     
     # Complementary filter (98% gyro, 2% accelerometer)
-    # Same as the working C++ example
     filter_coeff = 0.98
     
     roll = filter_coeff * (roll + gyro_x * dt) + (1 - filter_coeff) * roll_acc_rel
@@ -180,20 +179,22 @@ while True:
     last_alt = alt_m
     alt_ft = to_feet(alt_m)
     
-    # Send data at ~40Hz (every 10th iteration)
+    # Send data via radio at ~40Hz
     if counter % 10 == 0:
-        # Format for Processing - simple slash-separated like the C++ example
-        # Processing expects: roll/pitch/yaw
-        print(f"{roll:.3f}/{pitch:.3f}/{yaw:.3f}")
+        # TEXT MODE: Send roll/pitch/yaw as simple string
+        message = f"{roll:.3f}/{pitch:.3f}/{yaw:.3f}\n"
+        
+        # Send via radio (as bytes)
+        if not radio.send(message.encode()):
+            print("FAILED TO SEND RADIO")
+        
+        # Also print to USB serial for debugging
+        print(message.strip())
         
         # Also send altitude occasionally
         if counter % 20 == 0:
-            print(f"Alt(ft): {alt_ft:.2f}")
-    
-    # Optional: Send binary packet for radio (keep this if you need radio)
-    if counter % 4 == 0:  # Send radio at ~100Hz
-        msg = struct.pack('<I3f', counter, roll, pitch, yaw)
-        if not radio.send(msg):
-            print("FAILED TO SEND RADIO")
+            alt_msg = f"Alt(ft): {alt_ft:.2f}\n"
+            radio.send(alt_msg.encode())
+            print(alt_msg.strip())
     
     counter += 1
