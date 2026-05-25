@@ -2,9 +2,10 @@ from radio import Radio
 import time
 import struct
 from machine import Pin, I2C
-from time import sleep_ms
+from time import sleep_ms, ticks_us, ticks_diff
 from lib.MPU6050 import _ACC_RNG_2G, _GYR_RNG_250DEG, MPU6050
 from lib.BME280 import BME280
+import math
 
 radio = Radio()
 print("TX ready")
@@ -13,6 +14,25 @@ print("TX ready")
 SCL_PIN = 7
 SDA_PIN = 6
 FREQ = 400000
+
+# IMU update period (400 Hz = 2500 microseconds)
+IMU_PERIOD_US = 2500
+last_update_us = 0
+
+# Filtered angles (what we'll send to Processing)
+roll = 0.0
+pitch = 0.0
+yaw = 0.0
+
+# Offsets for zeroing
+roll_offset = 0.0
+pitch_offset = 0.0
+yaw_offset = 0.0
+
+# Gyro bias (calibration)
+gyro_bias_x = 0.0
+gyro_bias_y = 0.0
+gyro_bias_z = 0.0
 
 def init_sensors():
     """Initializes or resets the hardware connection to the sensors"""
@@ -30,104 +50,151 @@ def init_sensors():
         print("Sensor initialization failed:", e)
         return False
 
-# Initial hardware startup
-init_sensors()
+def wrap_angle(angle):
+    """Wrap angle to -180 to 180 degrees"""
+    while angle > 180.0:
+        angle -= 360.0
+    while angle < -180.0:
+        angle += 360.0
+    return angle
 
-# ---------- calibration ----------
-print("Calibrating gyro...")
-gx_off = gy_off = gz_off = 0
-samples = 200
+def compute_accel_angles(ax, ay, az):
+    """Calculate pitch and roll from accelerometer data"""
+    # Roll: rotation around X axis (using Y and Z)
+    roll_acc = math.atan2(ay, az) * 180.0 / math.pi
+    
+    # Pitch: rotation around Y axis (using X, Y, Z)
+    pitch_acc = math.atan2(-ax, math.sqrt(ay*ay + az*az)) * 180.0 / math.pi
+    
+    return roll_acc, pitch_acc
 
-for _ in range(samples):
-    try:
-        g = mpu.read_gyro_data()
-        gx_off += g['x']
-        gy_off += g['y']
-        gz_off += g['z']
-    except:
-        pass
-    sleep_ms(5)
+def calibrate_gyro():
+    """Calibrate gyro by taking 500 samples while stationary"""
+    global gyro_bias_x, gyro_bias_y, gyro_bias_z
+    samples = 500
+    sum_x = 0.0
+    sum_y = 0.0
+    sum_z = 0.0
+    
+    print("Calibrating gyro... keep device still")
+    
+    for i in range(samples):
+        gyro = mpu.read_gyro_data()
+        sum_x += gyro['x']
+        sum_y += gyro['y']
+        sum_z += gyro['z']
+        sleep_ms(3)
+    
+    gyro_bias_x = sum_x / samples
+    gyro_bias_y = sum_y / samples
+    gyro_bias_z = sum_z / samples
+    
+    print(f"Gyro calibration done. Biases: X={gyro_bias_x:.3f}, Y={gyro_bias_y:.3f}, Z={gyro_bias_z:.3f}")
 
-gx_off /= samples
-gy_off /= samples
-gz_off /= samples
-
-try:
-    bme.calibrate(samples=100, delay_ms=20)
-except:
-    print("BME calibration failed, skipping...")
-
-# ---------- helpers ----------
 def smooth(new, old):
     return (0.8 * old) + (0.2 * new)
 
 def to_feet(m):
     return m * 3.28084
 
+# Initial hardware startup
+init_sensors()
+
+# Calibrate gyro
+calibrate_gyro()
+
+# Get initial accelerometer angles for offset
+accel = mpu.read_accel_data(g=True)
+roll_acc, pitch_acc = compute_accel_angles(accel['x'], accel['y'], accel['z'])
+roll_offset = roll_acc
+pitch_offset = pitch_acc
+
+try:
+    bme.calibrate(samples=100, delay_ms=20)
+except:
+    print("BME calibration failed, skipping...")
+
 last_alt = 0.0
 counter = 0
 consecutive_dead_packets = 0
 
+# Initialize timing
+last_update_us = ticks_us()
+print("Starting main loop at 400Hz...")
+
 while True:
-    accel = mpu.read_accel_data(g=True) 
-    gyro = mpu.read_gyro_data()
-
-    # Watchdog check
-    if abs(accel['x']) == 0.0 and abs(accel['y']) == 0.0 and abs(accel['z']) == 0.0:
-        consecutive_dead_packets += 1
-        if consecutive_dead_packets >= 5:
-            print("WARNING: IMU freeze detected! Attempting hot-reset...")
-            init_sensors()
-            consecutive_dead_packets = 0
-            sleep_ms(50)
-            continue
-    else:
-        consecutive_dead_packets = 0
-
-    # Apply gyro calibration offsets
-    raw_gx = gyro['x'] - gx_off
-    raw_gy = gyro['y'] - gy_off
-    raw_gz = gyro['z'] - gz_off
-
-    # ========== CORRECTED AXIS MAPPING ==========
-    # Accelerometer mapping (keep this as is - it's working)
-    tx_ax = accel['z']   # Physical Z → Processing accelX (pitch)
-    tx_ay = accel['y']   # Physical Y → Processing accelY (roll)
-    tx_az = accel['x']   # Physical X → Processing accelZ (vertical)
+    # Timing control - maintain 400Hz update rate
+    now_us = ticks_us()
+    dt_us = ticks_diff(now_us, last_update_us)
     
-    # Gyroscope mapping (FIXED for yaw)
-    tx_gx = raw_gx       # Physical X → pitch rate (matches accelerometer mapping)
-    tx_gy = raw_gy       # Physical Y → roll rate (matches accelerometer mapping)
-    tx_gz = raw_gz       # Physical Z → yaw rate (matches accelerometer mapping)
-    # ============================================
-
-    # Altitude reading
+    if dt_us < IMU_PERIOD_US:
+        sleep_ms(1)
+        continue
+    
+    dt = dt_us / 1000000.0  # Convert to seconds
+    if dt > 0.01:  # Clamp dt to reasonable value
+        dt = 0.0025
+    
+    last_update_us = now_us
+    
+    # Read sensors
+    accel = mpu.read_accel_data(g=True)
+    gyro = mpu.read_gyro_data()
+    
+    # Apply gyro bias correction
+    gyro_x = gyro['x'] - gyro_bias_x
+    gyro_y = gyro['y'] - gyro_bias_y
+    gyro_z = gyro['z'] - gyro_bias_z
+    
+    # Calculate accelerometer angles (absolute)
+    roll_acc, pitch_acc = compute_accel_angles(accel['x'], accel['y'], accel['z'])
+    
+    # Apply offsets (relative to starting position)
+    roll_acc_rel = wrap_angle(roll_acc - roll_offset)
+    pitch_acc_rel = wrap_angle(pitch_acc - pitch_offset)
+    
+    # Complementary filter (98% gyro, 2% accelerometer)
+    filter_coeff = 0.98
+    
+    roll = filter_coeff * (roll + gyro_x * dt) + (1 - filter_coeff) * roll_acc_rel
+    pitch = filter_coeff * (pitch + gyro_y * dt) + (1 - filter_coeff) * pitch_acc_rel
+    yaw += gyro_z * dt
+    
+    # Wrap angles to -180..180
+    roll = wrap_angle(roll)
+    pitch = wrap_angle(pitch)
+    yaw = wrap_angle(yaw)
+    
+    # Altitude reading (at ~10Hz)
     try:
         temp, press, hum = bme.read_compensated_data()
         alt_m = bme.altitude(press)
     except:
         alt_m = last_alt
-
+    
     if abs(alt_m) < 0.5:
         alt_m = 0
-
+    
     alt_m = smooth(alt_m, last_alt)
     last_alt = alt_m
     alt_ft = to_feet(alt_m)
-
-    # Pack and send
-    msg = struct.pack('<I7f', 
-        counter, 
-        tx_gx, tx_gy, tx_gz, 
-        alt_ft, 
-        tx_ax, tx_ay, tx_az
-    )
-
-    # Debug output - should show Z ≈ 1.0G at rest
-    print(f"Pack {counter:3d} | Accel: X={tx_ax:5.2f} Y={tx_ay:5.2f} Z={tx_az:5.2f}G | Alt={alt_ft:5.2f}ft")
     
-    if not radio.send(msg):
-        print("FAILED TO SEND RADIO")
+    # Send data via radio at ~40Hz
+    if counter % 10 == 0:
+        # TEXT MODE: Send roll/pitch/yaw as simple string
+        message = f"{roll:.3f}/{pitch:.3f}/{yaw:.3f}\n"
+        
+        # Send via radio (as bytes)
+        if not radio.send(message.encode()):
+            print("FAILED TO SEND RADIO")
+        
+        # Also print to USB serial for debugging
+        print(message.strip())
+        
+        # Also send altitude occasionally
+        if counter % 20 == 0:
+            alt_msg = f"Alt(ft): {alt_ft:.2f}\n"
+            radio.send(alt_msg.encode())
+            print(alt_msg.strip())
     
     counter += 1
-    sleep_ms(50)
