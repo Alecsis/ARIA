@@ -6,27 +6,19 @@ from time import sleep_ms, ticks_us, ticks_diff
 from lib.MPU6050 import _ACC_RNG_2G, _GYR_RNG_250DEG, MPU6050
 from lib.BME280 import BME280
 import math
-from ws2812 import WS2812  # Custom Seeed Studio Library
+from ws2812 import WS2812  
 
-# ==========================================
-# XIAO RP2040 NEOPIXEL (POWER + DATA CONFIG)
-# ==========================================
-# Secret 1: Turn on physical power to the LED circuit
 led_power = Pin(11, Pin.OUT)
 led_power.value(1) 
 
-# Secret 2: Initialize using Seeed's specific ws2812 class
-# Pin 12, 1 single LED
 pixel = WS2812(12, 1)
 
-# Status color profiles (Red, Green, Blue)
-COLOR_RED    = (255, 0, 0)
-COLOR_GREEN  = (0, 255, 0)
-COLOR_ORANGE = (255, 100, 0)
-COLOR_BLACK  = (0, 0, 0)
+COLOR_RED    = (30, 0, 0)    # Soft Red
+COLOR_GREEN  = (0, 30, 0)    # Soft Green
+COLOR_ORANGE = (35, 10, 0)   # Soft Orange/Yellow
+COLOR_BLACK  = (0, 0, 0)     # Off
 
-# State flags
-system_status = "STARTUP"   # STARTUP, CALIBRATING, LINK_OK, LINK_FAIL
+system_status = "STARTUP"  
 current_color = COLOR_BLACK
 blink_toggle = False
 
@@ -35,44 +27,33 @@ def led_timer_callback(timer):
     global system_status, current_color, blink_toggle
     
     if system_status == "STARTUP":
-        # Solid Red: Looking for radio
         current_color = COLOR_RED
         
     elif system_status == "CALIBRATING":
-        # Flashing Orange: Processing sensors
         blink_toggle = not blink_toggle
         current_color = COLOR_ORANGE if blink_toggle else COLOR_BLACK
         
     elif system_status == "LINK_OK":
-        # Solid Green: Operational and Linked
         current_color = COLOR_GREEN
         
     elif system_status == "LINK_FAIL":
-        # Aggressive Red Flashing: Connection Lost
         blink_toggle = not blink_toggle
         current_color = COLOR_RED if blink_toggle else COLOR_BLACK
 
-# Initialize background timer (updates target variables every 200ms)
 led_timer = Timer(-1)
 led_timer.init(period=200, mode=Timer.PERIODIC, callback=led_timer_callback)
 
-# ==========================================
-# CORE HARDWARE SETUP
-# ==========================================
 system_status = "STARTUP"
 radio = Radio()
 print("TX ready")
 
-# Global hardware configurations
 SCL_PIN = 7
 SDA_PIN = 6
 FREQ = 400000
 
-# IMU update period (400 Hz = 2500 microseconds)
 IMU_PERIOD_US = 2500
 last_update_us = 0
 
-# Filtered angles
 roll = 0.0; pitch = 0.0; yaw = 0.0
 roll_offset = 0.0; pitch_offset = 0.0; yaw_offset = 0.0
 gyro_bias_x = 0.0; gyro_bias_y = 0.0; gyro_bias_z = 0.0
@@ -111,7 +92,6 @@ def calibrate_gyro():
     
     print("Calibrating gyro... keep device still")
     for i in range(samples):
-        # Force visual update during calibration routine
         pixel.pixels_fill(current_color)
         pixel.pixels_show()
         
@@ -129,7 +109,6 @@ def calibrate_gyro():
 def smooth(new, old): return (0.8 * old) + (0.2 * new)
 def to_feet(m): return m * 3.28084
 
-# Initialize Devices
 init_sensors()
 calibrate_gyro()
 
@@ -147,14 +126,11 @@ last_alt = 0.0
 counter = 0
 consecutive_dead_packets = 0
 
-# Arm main telemetry pipeline status
 system_status = "LINK_OK"
 last_update_us = ticks_us()
 print("Starting main loop at 400Hz...")
 
-# ==========================================
-# MAIN EXECUTION LOOP
-# ==========================================
+
 while True:
     now_us = ticks_us()
     dt_us = ticks_diff(now_us, last_update_us)
@@ -216,7 +192,6 @@ while True:
             radio.send(alt_msg.encode())
             print(alt_msg.strip())
             
-        # Push colors safely via the Seeed Library native functions 
         pixel.pixels_fill(current_color)
         pixel.pixels_show()
     
