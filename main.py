@@ -1,12 +1,65 @@
 from radio import Radio
 import time
 import struct
-from machine import Pin, I2C
+from machine import Pin, I2C, Timer
 from time import sleep_ms, ticks_us, ticks_diff
 from lib.MPU6050 import _ACC_RNG_2G, _GYR_RNG_250DEG, MPU6050
 from lib.BME280 import BME280
 import math
+from ws2812 import WS2812  # Custom Seeed Studio Library
 
+# ==========================================
+# XIAO RP2040 NEOPIXEL (POWER + DATA CONFIG)
+# ==========================================
+# Secret 1: Turn on physical power to the LED circuit
+led_power = Pin(11, Pin.OUT)
+led_power.value(1) 
+
+# Secret 2: Initialize using Seeed's specific ws2812 class
+# Pin 12, 1 single LED
+pixel = WS2812(12, 1)
+
+# Status color profiles (Red, Green, Blue)
+COLOR_RED    = (255, 0, 0)
+COLOR_GREEN  = (0, 255, 0)
+COLOR_ORANGE = (255, 100, 0)
+COLOR_BLACK  = (0, 0, 0)
+
+# State flags
+system_status = "STARTUP"   # STARTUP, CALIBRATING, LINK_OK, LINK_FAIL
+current_color = COLOR_BLACK
+blink_toggle = False
+
+def led_timer_callback(timer):
+    """Safe, ultra-fast background color switcher"""
+    global system_status, current_color, blink_toggle
+    
+    if system_status == "STARTUP":
+        # Solid Red: Looking for radio
+        current_color = COLOR_RED
+        
+    elif system_status == "CALIBRATING":
+        # Flashing Orange: Processing sensors
+        blink_toggle = not blink_toggle
+        current_color = COLOR_ORANGE if blink_toggle else COLOR_BLACK
+        
+    elif system_status == "LINK_OK":
+        # Solid Green: Operational and Linked
+        current_color = COLOR_GREEN
+        
+    elif system_status == "LINK_FAIL":
+        # Aggressive Red Flashing: Connection Lost
+        blink_toggle = not blink_toggle
+        current_color = COLOR_RED if blink_toggle else COLOR_BLACK
+
+# Initialize background timer (updates target variables every 200ms)
+led_timer = Timer(-1)
+led_timer.init(period=200, mode=Timer.PERIODIC, callback=led_timer_callback)
+
+# ==========================================
+# CORE HARDWARE SETUP
+# ==========================================
+system_status = "STARTUP"
 radio = Radio()
 print("TX ready")
 
@@ -19,23 +72,12 @@ FREQ = 400000
 IMU_PERIOD_US = 2500
 last_update_us = 0
 
-# Filtered angles (what we'll send to Processing)
-roll = 0.0
-pitch = 0.0
-yaw = 0.0
-
-# Offsets for zeroing
-roll_offset = 0.0
-pitch_offset = 0.0
-yaw_offset = 0.0
-
-# Gyro bias (calibration)
-gyro_bias_x = 0.0
-gyro_bias_y = 0.0
-gyro_bias_z = 0.0
+# Filtered angles
+roll = 0.0; pitch = 0.0; yaw = 0.0
+roll_offset = 0.0; pitch_offset = 0.0; yaw_offset = 0.0
+gyro_bias_x = 0.0; gyro_bias_y = 0.0; gyro_bias_z = 0.0
 
 def init_sensors():
-    """Initializes or resets the hardware connection to the sensors"""
     global i2c, mpu, bme
     print("Initializing I2C Bus and Sensors...")
     try:
@@ -51,34 +93,28 @@ def init_sensors():
         return False
 
 def wrap_angle(angle):
-    """Wrap angle to -180 to 180 degrees"""
-    while angle > 180.0:
-        angle -= 360.0
-    while angle < -180.0:
-        angle += 360.0
+    while angle > 180.0: angle -= 360.0
+    while angle < -180.0: angle += 360.0
     return angle
 
 def compute_accel_angles(ax, ay, az):
-    """Calculate pitch and roll from accelerometer data"""
-    # Roll: rotation around X axis (using Y and Z)
     roll_acc = math.atan2(ay, az) * 180.0 / math.pi
-    
-    # Pitch: rotation around Y axis (using X, Y, Z)
     pitch_acc = math.atan2(-ax, math.sqrt(ay*ay + az*az)) * 180.0 / math.pi
-    
     return roll_acc, pitch_acc
 
 def calibrate_gyro():
-    """Calibrate gyro by taking 500 samples while stationary"""
-    global gyro_bias_x, gyro_bias_y, gyro_bias_z
+    global gyro_bias_x, gyro_bias_y, gyro_bias_z, system_status
+    system_status = "CALIBRATING"
+    
     samples = 500
-    sum_x = 0.0
-    sum_y = 0.0
-    sum_z = 0.0
+    sum_x = 0.0; sum_y = 0.0; sum_z = 0.0
     
     print("Calibrating gyro... keep device still")
-    
     for i in range(samples):
+        # Force visual update during calibration routine
+        pixel.pixels_fill(current_color)
+        pixel.pixels_show()
+        
         gyro = mpu.read_gyro_data()
         sum_x += gyro['x']
         sum_y += gyro['y']
@@ -88,22 +124,15 @@ def calibrate_gyro():
     gyro_bias_x = sum_x / samples
     gyro_bias_y = sum_y / samples
     gyro_bias_z = sum_z / samples
-    
-    print(f"Gyro calibration done. Biases: X={gyro_bias_x:.3f}, Y={gyro_bias_y:.3f}, Z={gyro_bias_z:.3f}")
+    print("Gyro calibration done.")
 
-def smooth(new, old):
-    return (0.8 * old) + (0.2 * new)
+def smooth(new, old): return (0.8 * old) + (0.2 * new)
+def to_feet(m): return m * 3.28084
 
-def to_feet(m):
-    return m * 3.28084
-
-# Initial hardware startup
+# Initialize Devices
 init_sensors()
-
-# Calibrate gyro
 calibrate_gyro()
 
-# Get initial accelerometer angles for offset
 accel = mpu.read_accel_data(g=True)
 roll_acc, pitch_acc = compute_accel_angles(accel['x'], accel['y'], accel['z'])
 roll_offset = roll_acc
@@ -118,12 +147,15 @@ last_alt = 0.0
 counter = 0
 consecutive_dead_packets = 0
 
-# Initialize timing
+# Arm main telemetry pipeline status
+system_status = "LINK_OK"
 last_update_us = ticks_us()
 print("Starting main loop at 400Hz...")
 
+# ==========================================
+# MAIN EXECUTION LOOP
+# ==========================================
 while True:
-    # Timing control - maintain 400Hz update rate
     now_us = ticks_us()
     dt_us = ticks_diff(now_us, last_update_us)
     
@@ -131,70 +163,61 @@ while True:
         sleep_ms(1)
         continue
     
-    dt = dt_us / 1000000.0  # Convert to seconds
-    if dt > 0.01:  # Clamp dt to reasonable value
-        dt = 0.0025
-    
+    dt = dt_us / 1000000.0
+    if dt > 0.01: dt = 0.0025
     last_update_us = now_us
     
-    # Read sensors
     accel = mpu.read_accel_data(g=True)
     gyro = mpu.read_gyro_data()
     
-    # Apply gyro bias correction
     gyro_x = gyro['x'] - gyro_bias_x
     gyro_y = gyro['y'] - gyro_bias_y
     gyro_z = gyro['z'] - gyro_bias_z
     
-    # Calculate accelerometer angles (absolute)
     roll_acc, pitch_acc = compute_accel_angles(accel['x'], accel['y'], accel['z'])
-    
-    # Apply offsets (relative to starting position)
     roll_acc_rel = wrap_angle(roll_acc - roll_offset)
     pitch_acc_rel = wrap_angle(pitch_acc - pitch_offset)
     
-    # Complementary filter (98% gyro, 2% accelerometer)
     filter_coeff = 0.98
-    
     roll = filter_coeff * (roll + gyro_x * dt) + (1 - filter_coeff) * roll_acc_rel
     pitch = filter_coeff * (pitch + gyro_y * dt) + (1 - filter_coeff) * pitch_acc_rel
     yaw += gyro_z * dt
     
-    # Wrap angles to -180..180
-    roll = wrap_angle(roll)
-    pitch = wrap_angle(pitch)
-    yaw = wrap_angle(yaw)
+    roll = wrap_angle(roll); pitch = wrap_angle(pitch); yaw = wrap_angle(yaw)
     
-    # Altitude reading (at ~10Hz)
     try:
         temp, press, hum = bme.read_compensated_data()
         alt_m = bme.altitude(press)
     except:
         alt_m = last_alt
-    
-    if abs(alt_m) < 0.5:
-        alt_m = 0
-    
+        
+    if abs(alt_m) < 0.5: alt_m = 0
     alt_m = smooth(alt_m, last_alt)
     last_alt = alt_m
     alt_ft = to_feet(alt_m)
     
     # Send data via radio at ~40Hz
     if counter % 10 == 0:
-        # TEXT MODE: Send roll/pitch/yaw as simple string
         message = f"{roll:.3f}/{pitch:.3f}/{yaw:.3f}\n"
         
-        # Send via radio (as bytes)
         if not radio.send(message.encode()):
             print("FAILED TO SEND RADIO")
+            consecutive_dead_packets += 1
+            if consecutive_dead_packets > 5:
+                system_status = "LINK_FAIL"
+        else:
+            consecutive_dead_packets = 0
+            system_status = "LINK_OK"
         
-        # Also print to USB serial for debugging
         print(message.strip())
         
-        # Also send altitude occasionally
         if counter % 20 == 0:
             alt_msg = f"Alt(ft): {alt_ft:.2f}\n"
             radio.send(alt_msg.encode())
             print(alt_msg.strip())
+            
+        # Push colors safely via the Seeed Library native functions 
+        pixel.pixels_fill(current_color)
+        pixel.pixels_show()
     
     counter += 1
